@@ -1,0 +1,83 @@
+# BaraCommLib - Default Hardware Configuration Template
+
+robot:
+  name: "Capybara-Default"
+  version: "1.0.0"
+  base_speed: 100   # Speed while doing stuff unless specified
+
+drivetrain:   # We offer support for H bridge connected motors.
+  max_pwm_value: 100
+  motors:
+    left: # A
+      in1: 12
+      in2: 13
+      mounted_backwards: false
+    right:  # B
+      in1: 14
+      in2: 18
+      mounted_backwards: false
+
+  encoders: # Optional, for odometry
+    exists: false   # Setting this to false is the same as removing this part of config
+    left:
+      pin_a: 32
+      pin_b: 33
+    right:
+      pin_a: 34
+      pin_b: 35
+
+sensors:
+  buses:
+    # Define I2C/SPI buses used by the robot
+    - id: "i2c_1"
+      type: "i2c"
+      scl_pin: 22
+      sda_pin: 21
+      frequency: 400000   # Change this if you are having interference problems
+
+  tof:
+    # Time of Flight sensors (e.g., VL53L0X, VL53L1X).
+    - id: "front"
+      model: "VL53L1X"   # We offer support for VL53L0X, VL53L1X, VL53L4CD.
+      bus: "i2c_1"
+      xshut_pin: 15
+      default_address: 0x29
+      new_address: 0x30 # Target address to assign during setup to avoid conflicts. This should not be already used on that bus
+    - id: "left"
+      bus: "i2c_1"
+      xshut_pin: 16
+      default_address: 0x29
+      new_address: 0x31
+    - id: "right"
+      bus: "i2c_1"
+      xshut_pin: 17
+      default_address: 0x29
+      new_address: 0x32
+
+  imu:
+    # Gyroscopes / Accelerometers
+    - id: "main_gyro"
+      model: "BNO085" # e.g., MPU6050, BNO055, BNO085
+      bus: "i2c_1"  # Should normally be i2c_X. Default is 1, but if you created a custom bus you should write it here.
+      address: 0x4A
+      inverted_axes: [false, false, true] # [X, Y, Z] inversion if mounted upside down
+
+io:
+  buttons:
+    - id: "start"
+      pin: 0
+      pull: "up" # 'up', 'down', 'none'
+      debounce_ms: 50
+  
+  leds:
+    - id: "status_led"
+      pin: 2
+      pwm: false # Set to true if it's a breathing/dimmable LED controlled with PWM
+
+vision:       # This is a really stretchy thing, I hope I will be able to make it avaliable in the future.
+  enabled: false 
+  cameras:
+    - id: "main_cam"
+      source: 0 # Integer for /dev/video0, or string for IP stream
+      resolution: [640, 480]
+      fps: 30
