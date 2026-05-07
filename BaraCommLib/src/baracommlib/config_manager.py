@@ -80,7 +80,8 @@ class ConfigManager:
                     print(f"Config validation failed: drivetrain.motors.{side} 'in1' and 'in2' must be integers")
                     return False
                 if not _register_pin(m.get('in1'), f"motor_{side}_in1") or \
-                   not _register_pin(m.get('in2'), f"motor_{side}_in2"):
+                   not _register_pin(m.get('in2'), f"motor_{side}_in2") or \
+                    not _register_pin(m.get('pwm'), f"motor_{side}_pwm"):
                     return False
                 
                 if not isinstance(m.get('mounted_backwards', False), bool):
@@ -106,7 +107,10 @@ class ConfigManager:
             defined_buses = set()
             if 'buses' in sensors:
                 for bus in sensors['buses']:
-                    bid = bus.get('id')
+                    bid : str = bus.get('id')
+                    if not bid.startswith("i2c_"):
+                        print("Config validation failed: I2C bus id is not correct")
+                        return False
                     defined_buses.add(bid)
                     if not isinstance(bus.get('scl_pin'), int) or not isinstance(bus.get('sda_pin'), int):
                         print(f"Config validation failed: Bus {bid} SCL/SDA pins must be integers")

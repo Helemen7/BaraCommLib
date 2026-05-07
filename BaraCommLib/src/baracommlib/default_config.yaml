@@ -11,10 +11,12 @@ drivetrain:   # We offer support for H bridge connected motors.
     left: # A
       in1: 12
       in2: 13
+      pwm: 19
       mounted_backwards: false
     right:  # B
       in1: 14
       in2: 18
+      pwm: 29
       mounted_backwards: false
 
   encoders: # Optional, for odometry
