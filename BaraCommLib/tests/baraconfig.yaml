@@ -39,18 +39,21 @@ sensors:
 
   tof:
     # Time of Flight sensors (e.g., VL53L0X, VL53L1X).
-    - id: "front"
+    - id: "front"   # This should be a unique identifier
+      direction: "front" # Required. Allowed values: front, left, right, back. This should represent the direction it's facing
       model: "VL53L1X"   # We offer support for VL53L0X, VL53L1X, VL53L4CD.
       bus: "i2c_1"
       xshut_pin: 15
       default_address: 0x29
       new_address: 0x30 # Target address to assign during setup to avoid conflicts. This should not be already used on that bus
     - id: "left"
+      direction: "left"
       bus: "i2c_1"
       xshut_pin: 16
       default_address: 0x29
       new_address: 0x31
     - id: "right"
+      direction: "right"
       bus: "i2c_1"
       xshut_pin: 17
       default_address: 0x29

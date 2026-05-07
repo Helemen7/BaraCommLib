@@ -28,6 +28,25 @@ class ConfigManager:
         else:
             raise RuntimeError("CRITICAL LIBRARY ERROR: Library default_config.yaml is missing!")
 
+    def _validate_field(self, data: dict, field: str, expected_type=None, allowed_values=None, required=True, context="") -> bool:
+        """Helper to quickly validate config fields and types/values to make adding new settings easier."""
+        if field not in data:
+            if required:
+                print(f"Config validation failed: Missing required field '{field}' in {context}")
+                return False
+            return True
+            
+        val = data[field]
+        if expected_type and not isinstance(val, expected_type):
+            print(f"Config validation failed: Field '{field}' in {context} must be of type {expected_type.__name__}, got {type(val).__name__}")
+            return False
+            
+        if allowed_values and val not in allowed_values:
+            print(f"Config validation failed: Field '{field}' in {context} must be one of {allowed_values}, got '{val}'")
+            return False
+            
+        return True
+
     def _isConfigHealthy(self, config: dict) -> bool:
         if not isinstance(config, dict):
             print("Config validation failed: Root must be a dictionary")
@@ -55,8 +74,10 @@ class ConfigManager:
 
         try:
             # 0. Robot validation
-            if not config.get('robot', {}).get('base_speed') or not isinstance(config.get('robot', {}).get('base_speed'), int) or config.get('robot', {}).get('base_speed') > config.get('drivetrain', {}).get('max_pwm_value'):
-                print("Config validation failed: Missing or wrong base speed.")
+            robot = config.get('robot', {})
+            if not self._validate_field(robot, 'base_speed', int, context="robot"): return False
+            if robot['base_speed'] > config.get('drivetrain', {}).get('max_pwm_value', 100):
+                print("Config validation failed: base speed is greater than max_pwm_value.")
                 return False
                 
             # 1. Drivetrain Validation
@@ -65,8 +86,9 @@ class ConfigManager:
                 print("Config validation failed: Missing 'drivetrain' fundamental section")
                 return False
                 
-            if not isinstance(dt.get('max_pwm_value'), int) or dt.get('max_pwm_value') <= 0:
-                print("Config validation failed: drivetrain.max_pwm_value must be a positive integer")
+            if not self._validate_field(dt, 'max_pwm_value', int, context="drivetrain"): return False
+            if dt['max_pwm_value'] <= 0:
+                print("Config validation failed: drivetrain.max_pwm_value must be positive")
                 return False
                 
             motors = dt.get('motors')
@@ -76,16 +98,15 @@ class ConfigManager:
                 
             for side in ['left', 'right']:
                 m = motors[side]
-                if not isinstance(m.get('in1'), int) or not isinstance(m.get('in2'), int):
-                    print(f"Config validation failed: drivetrain.motors.{side} 'in1' and 'in2' must be integers")
-                    return False
-                if not _register_pin(m.get('in1'), f"motor_{side}_in1") or \
-                   not _register_pin(m.get('in2'), f"motor_{side}_in2") or \
-                    not _register_pin(m.get('pwm'), f"motor_{side}_pwm"):
-                    return False
+                ctx = f"drivetrain.motors.{side}"
+                if not self._validate_field(m, 'in1', int, context=ctx): return False
+                if not self._validate_field(m, 'in2', int, context=ctx): return False
+                if not self._validate_field(m, 'pwm', int, context=ctx): return False
+                if not self._validate_field(m, 'mounted_backwards', bool, required=False, context=ctx): return False
                 
-                if not isinstance(m.get('mounted_backwards', False), bool):
-                    print(f"Config validation failed: drivetrain.motors.{side}.mounted_backwards must be a boolean")
+                if not _register_pin(m['in1'], f"motor_{side}_in1") or \
+                   not _register_pin(m['in2'], f"motor_{side}_in2") or \
+                   not _register_pin(m['pwm'], f"motor_{side}_pwm"):
                     return False
 
             encoders = dt.get('encoders', {})
@@ -95,11 +116,12 @@ class ConfigManager:
                         print(f"Config validation failed: drivetrain.encoders missing '{side}'")
                         return False
                     enc = encoders[side]
-                    if not isinstance(enc.get('pin_a'), int) or not isinstance(enc.get('pin_b'), int):
-                        print(f"Config validation failed: drivetrain.encoders.{side} pins must be integers")
-                        return False
-                    if not _register_pin(enc.get('pin_a'), f"encoder_{side}_a") or \
-                       not _register_pin(enc.get('pin_b'), f"encoder_{side}_b"):
+                    ctx = f"drivetrain.encoders.{side}"
+                    if not self._validate_field(enc, 'pin_a', int, context=ctx): return False
+                    if not self._validate_field(enc, 'pin_b', int, context=ctx): return False
+                    
+                    if not _register_pin(enc['pin_a'], f"encoder_{side}_a") or \
+                       not _register_pin(enc['pin_b'], f"encoder_{side}_b"):
                         return False
 
             # 2. Sensors Validation
@@ -107,85 +129,81 @@ class ConfigManager:
             defined_buses = set()
             if 'buses' in sensors:
                 for bus in sensors['buses']:
-                    bid : str = bus.get('id')
+                    bid = bus.get('id', '')
+                    ctx = f"sensors.buses[{bid}]"
                     if not bid.startswith("i2c_"):
-                        print("Config validation failed: I2C bus id is not correct")
+                        print(f"Config validation failed: I2C bus id '{bid}' is not correct")
                         return False
                     defined_buses.add(bid)
-                    if not isinstance(bus.get('scl_pin'), int) or not isinstance(bus.get('sda_pin'), int):
-                        print(f"Config validation failed: Bus {bid} SCL/SDA pins must be integers")
+                    if not self._validate_field(bus, 'scl_pin', int, context=ctx): return False
+                    if not self._validate_field(bus, 'sda_pin', int, context=ctx): return False
+                    
+                    if not _register_pin(bus['scl_pin'], f"bus_{bid}_scl") or \
+                       not _register_pin(bus['sda_pin'], f"bus_{bid}_sda"):
                         return False
-                    if not _register_pin(bus.get('scl_pin'), f"bus_{bid}_scl") or \
-                       not _register_pin(bus.get('sda_pin'), f"bus_{bid}_sda"):
-                        return False
+
+            allowed_directions = ["front", "left", "right", "back"]
 
             if 'tof' in sensors:
                 allowed_tof = ["VL53L0X", "VL53L1X", "VL53L4CD"]
                 for tof in sensors['tof']:
                     tid = tof.get('id')
-                    model = tof.get('model', 'VL53L1X') # Fallback
-                    if model not in allowed_tof:
-                        print(f"Config validation failed: ToF {tid} model '{model}' not supported.")
-                        return False
+                    ctx = f"sensors.tof[{tid}]"
+                    
+                    if not self._validate_field(tof, 'direction', str, allowed_values=allowed_directions, context=ctx): return False
+                    if not self._validate_field(tof, 'model', str, allowed_values=allowed_tof, required=False, context=ctx): return False
                     
                     bus_id = tof.get('bus')
                     if bus_id not in defined_buses:
                         print(f"Config validation failed: ToF {tid} uses undefined bus '{bus_id}'")
                         return False
                         
-                    xshut = tof.get('xshut_pin')
-                    if not isinstance(xshut, int):
-                        print(f"Config validation failed: ToF {tid} xshut_pin must be integer")
-                        return False
-                    if not _register_pin(xshut, f"tof_{tid}_xshut"):
+                    if not self._validate_field(tof, 'xshut_pin', int, context=ctx): return False
+                    if not _register_pin(tof['xshut_pin'], f"tof_{tid}_xshut"):
                         return False
                         
-                    new_addr = tof.get('new_address')
-                    if new_addr is not None:
-                        if not _register_i2c_address(bus_id, new_addr, f"tof_{tid}"):
+                    if 'new_address' in tof:
+                        if not _register_i2c_address(bus_id, tof['new_address'], f"tof_{tid}"):
                             return False
 
             if 'imu' in sensors:
                 for imu in sensors['imu']:
                     iid = imu.get('id')
+                    ctx = f"sensors.imu[{iid}]"
+                    
                     bus_id = imu.get('bus')
                     if bus_id not in defined_buses:
                         print(f"Config validation failed: IMU {iid} uses undefined bus '{bus_id}'")
                         return False
                     
-                    addr = imu.get('address')
-                    if addr is not None:
-                        if not _register_i2c_address(bus_id, addr, f"imu_{iid}"):
+                    if 'address' in imu:
+                        if not _register_i2c_address(bus_id, imu['address'], f"imu_{iid}"):
                             return False
                             
-                    inv = imu.get('inverted_axes')
-                    if inv is not None and (not isinstance(inv, list) or len(inv) != 3):
-                        print(f"Config validation failed: IMU {iid} inverted_axes must be a list of 3 booleans")
-                        return False
+                    if 'inverted_axes' in imu:
+                        inv = imu['inverted_axes']
+                        if not isinstance(inv, list) or len(inv) != 3:
+                            print(f"Config validation failed: IMU {iid} inverted_axes must be a list of 3 booleans")
+                            return False
 
             # 3. IO Validation
             io_cfg = config.get('io', {})
             if 'buttons' in io_cfg:
                 for btn in io_cfg['buttons']:
                     bid = btn.get('id')
-                    bpin = btn.get('pin')
-                    if not isinstance(bpin, int):
-                        print(f"Config validation failed: Button {bid} pin must be an integer")
-                        return False
-                    if not _register_pin(bpin, f"button_{bid}"):
-                        return False
-                    if btn.get('pull') not in ['up', 'down', 'none']:
-                        print(f"Config validation failed: Button {bid} pull must be 'up', 'down', or 'none'")
+                    ctx = f"io.buttons[{bid}]"
+                    if not self._validate_field(btn, 'pin', int, context=ctx): return False
+                    if not self._validate_field(btn, 'pull', str, allowed_values=['up', 'down', 'none'], context=ctx): return False
+                    
+                    if not _register_pin(btn['pin'], f"button_{bid}"):
                         return False
 
             if 'leds' in io_cfg:
                 for led in io_cfg['leds']:
                     lid = led.get('id')
-                    lpin = led.get('pin')
-                    if not isinstance(lpin, int):
-                        print(f"Config validation failed: LED {lid} pin must be an integer")
-                        return False
-                    if not _register_pin(lpin, f"led_{lid}"):
+                    ctx = f"io.leds[{lid}]"
+                    if not self._validate_field(led, 'pin', int, context=ctx): return False
+                    if not _register_pin(led['pin'], f"led_{lid}"):
                         return False
 
             # 4. Vision Validation

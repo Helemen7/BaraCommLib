@@ -1,63 +1,120 @@
 import RPi.GPIO as GPIO
+from typing import *
+from enum import Enum
+
+from .exceptions.MaxPowerExceededException import MaxPowerExceededException
+
+class Motor(Enum):
+    A = 0
+    B = 1
+
+class MotorIN:
+    def __init__(self, pin: int):
+        self.pin = pin
+        self.lastState = 0
+
+    def set(self, state: Literal[0, 1]):
+        GPIO.output(self.pin, state)
+        self.lastState = state
 
 
 class Motors:
+    # This class should be the only one accessing its pins. Undefined behaviour might happen if pins are edited
     def __init__(self, config: dict):
         self.config = config
-        motors = self.config.get("drivetrain").get("motors")
-        leftA = motors.get("left")
-        rightB = motors.get("right")
+        
+        # Accessing nested dictionaries directly to fail fast with KeyError if configuration is missing
+        drivetrain_config = self.config["drivetrain"]
+        motors = drivetrain_config["motors"]
+        leftA = motors["left"]
+        rightB = motors["right"]
 
-        self.AIN1 = leftA.get("in1")
-        self.AIN2 = leftA.get("in2")
-        self.BIN1 = rightB.get("in1")
-        self.BIN2 = rightB.get("in2")
+        self.AIN1 = MotorIN(leftA["in1"])
+        self.AIN2 = MotorIN(leftA["in2"])
+        self.BIN1 = MotorIN(rightB["in1"])
+        self.BIN2 = MotorIN(rightB["in2"])
 
-        self.PWMA = leftA.get("pwm")
-        self.PWMB = rightB.get("pwm")
+        self.PWMA = leftA["pwm"]
+        self.PWMB = rightB["pwm"]
 
         GPIO.setmode(GPIO.BCM)
-        GPIO.setup([self.AIN1, self.AIN2, self.BIN1, self.BIN2], GPIO.OUT)
+        GPIO.setup([self.AIN1.pin, self.AIN2.pin, self.BIN1.pin, self.BIN2.pin], GPIO.OUT)
         GPIO.setup([self.PWMA, self.PWMB], GPIO.OUT)
 
         self.pwm_a = GPIO.PWM(self.PWMA, 1000)
         self.pwm_b = GPIO.PWM(self.PWMB, 1000)
         self.pwm_a.start(0)
         self.pwm_b.start(0)
+        
+        self._is_forced = False
+
+        # Set default state
+        self.coast()
 
     def move_forward_action(self, speed: int):
-        GPIO.output(self.AIN1, GPIO.HIGH)
-        GPIO.output(self.AIN2, GPIO.LOW)
-        GPIO.output(self.BIN1, GPIO.HIGH)
-        GPIO.output(self.BIN2, GPIO.LOW)
+        if speed > self.config["drivetrain"]["max_pwm_value"]:
+            raise MaxPowerExceededException("Max power exceeded. Set max_pwm_value in config or lower speed.")
+        self._is_forced = False
+        self.AIN1.set(GPIO.HIGH)
+        self.AIN2.set(GPIO.LOW)
+        self.BIN1.set(GPIO.HIGH)
+        self.BIN2.set(GPIO.LOW)
+
         self.pwm_a.ChangeDutyCycle(speed)
         self.pwm_b.ChangeDutyCycle(speed)
 
     def turn_left_action(self, speed: int):
-        GPIO.output(self.AIN1, GPIO.LOW)
-        GPIO.output(self.AIN2, GPIO.HIGH)
-        GPIO.output(self.BIN1, GPIO.HIGH)
-        GPIO.output(self.BIN2, GPIO.LOW)
+        if speed > self.config["drivetrain"]["max_pwm_value"]:
+            raise MaxPowerExceededException("Max power exceeded. Set max_pwm_value in config or lower speed.")
+        self._is_forced = False
+        self.AIN1.set(GPIO.LOW)
+        self.AIN2.set(GPIO.HIGH)
+        self.BIN1.set(GPIO.HIGH)
+        self.BIN2.set(GPIO.LOW)
         self.pwm_a.ChangeDutyCycle(speed)
         self.pwm_b.ChangeDutyCycle(speed)
 
     def turn_right_action(self, speed: int):
-        GPIO.output(self.AIN1, GPIO.HIGH)
-        GPIO.output(self.AIN2, GPIO.LOW)
-        GPIO.output(self.BIN1, GPIO.LOW)
-        GPIO.output(self.BIN2, GPIO.HIGH)
+        if speed > self.config["drivetrain"]["max_pwm_value"]:
+            raise MaxPowerExceededException("Max power exceeded. Set max_pwm_value in config or lower speed.")
+        self._is_forced = False
+        self.AIN1.set(GPIO.HIGH)
+        self.AIN2.set(GPIO.LOW)
+        self.BIN1.set(GPIO.LOW)
+        self.BIN2.set(GPIO.HIGH)
         self.pwm_a.ChangeDutyCycle(speed)
         self.pwm_b.ChangeDutyCycle(speed)
 
     def coast(self):
-        GPIO.output([self.AIN1, self.AIN2, self.BIN1, self.BIN2], GPIO.LOW)
+        self._is_forced = False
+        self.AIN1.set(GPIO.LOW)
+        self.AIN2.set(GPIO.LOW)
+        self.BIN1.set(GPIO.LOW)
+        self.BIN2.set(GPIO.LOW)
         self.pwm_a.ChangeDutyCycle(0)
         self.pwm_b.ChangeDutyCycle(0)
 
     def force_brake(self, max_pwm_value: int):
-        # This shouldn't be kept on for more then a few seconds because it puts strains on components
-        GPIO.output([self.AIN1, self.AIN2, self.BIN1, self.BIN2], GPIO.HIGH)
+        # This shouldn't be kept on for more then a few seconds because it puts strains on components like H bridge and motors.
+        # Should this be wrapped in a thread that coasts and blocks execution if this state is kept for too long
+        if max_pwm_value > self.config["drivetrain"]["max_pwm_value"]:
+            raise MaxPowerExceededException("Max power exceeded. Set max_pwm_value in config or lower speed.")
+        self._is_forced = True
+        self.AIN1.set(GPIO.HIGH)
+        self.AIN2.set(GPIO.HIGH)
+        self.BIN1.set(GPIO.HIGH)
+        self.BIN2.set(GPIO.HIGH)
         self.pwm_a.ChangeDutyCycle(max_pwm_value)
+        self.pwm_b.ChangeDutyCycle(max_pwm_value)
     
-        
-        
+    def assign_manual_power(self, motor: Motor, power: int):
+        if power > self.config["drivetrain"]["max_pwm_value"]:
+            raise MaxPowerExceededException("Max power exceeded. Set max_pwm_value in config or lower speed.")
+        self._is_forced = False
+        if motor == Motor.A:
+            self.pwm_a.ChangeDutyCycle(power)
+        elif motor == Motor.B:
+            self.pwm_b.ChangeDutyCycle(power)
+    
+    def are_forced(self) -> bool:
+        return self._is_forced
