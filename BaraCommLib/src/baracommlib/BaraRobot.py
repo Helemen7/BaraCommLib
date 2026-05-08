@@ -12,6 +12,7 @@ except (ImportError, RuntimeError):
 from .config_manager import ConfigManager
 from .sensors import SensorsManager
 from .Motors import Motors
+from .vision.vision_manager import VisionManager
 
 class _SensorProxy:
     def __init__(self, manager: SensorsManager):
@@ -37,6 +38,13 @@ class BaraRobot:
         
         self.drivetrain = Motors(self.config)
         
+        # Initialize vision if enabled
+        vision_cfg = self.config.get("vision", {})
+        if vision_cfg.get("enabled", False):
+            self.vision = VisionManager()
+        else:
+            self.vision = None
+        
         self._button_callbacks = {}
         self._button_threads = []
         self._running = True
@@ -59,6 +67,25 @@ class BaraRobot:
                     pud = GPIO.PUD_OFF
                     
                 GPIO.setup(pin, GPIO.IN, pull_up_down=pud)
+                
+        # Setup Vision subsystem
+        if self.vision:
+            vision_cfg = self.config.get("vision", {})
+            model_path = vision_cfg.get("model_path")
+            if model_path:
+                try:
+                    self.vision.load_model(model_path)
+                except Exception as e:
+                    import logging
+                    logging.error(f"Failed to load vision model: {e}")
+                    
+            cameras = vision_cfg.get("cameras", [])
+            for cam in cameras:
+                cam_id = cam.get("id")
+                source = cam.get("source", 0)
+                res = cam.get("resolution", [640, 480])
+                if cam_id is not None:
+                    self.vision.start_camera(cam_id, source=source, resolution=tuple(res))
                 
     def setupSensors(self):
         pass
@@ -189,6 +216,13 @@ class BaraRobot:
         if hasattr(self, 'sensors_manager') and self.sensors_manager:
             try:
                 self.sensors_manager.stop_all()
+            except Exception:
+                pass
+                
+        # Stop vision cameras gracefully
+        if hasattr(self, 'vision') and self.vision:
+            try:
+                self.vision.stop_all()
             except Exception:
                 pass
             
