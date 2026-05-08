@@ -12,11 +12,13 @@ except ImportError:
     logging.warning("OpenCV or Numpy not found. pip install opencv-python numpy")
 
 # Try to use lightweight tflite_runtime if available (standard on RPi), otherwise fallback to full TF
+Interpreter = None
 try:
     from tflite_runtime.interpreter import Interpreter
 except ImportError:
     try:
-        from tensorflow.lite import Interpreter
+        import tensorflow as tf
+        Interpreter = tf.lite.Interpreter
     except ImportError:
         logging.warning("No TFLite interpreter found. pip install tflite-runtime OR tensorflow")
 

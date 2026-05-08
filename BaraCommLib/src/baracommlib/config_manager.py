@@ -191,16 +191,6 @@ class ConfigManager:
                         if not isinstance(inv, list) or len(inv) != 3:
                             print(f"Config validation failed: IMU {iid} inverted_axes must be a list of 3 booleans")
                             return False
-                    
-                    if 'address' in imu:
-                        if not _register_i2c_address(bus_id, imu['address'], f"imu_{iid}"):
-                            return False
-                            
-                    if 'inverted_axes' in imu:
-                        inv = imu['inverted_axes']
-                        if not isinstance(inv, list) or len(inv) != 3:
-                            print(f"Config validation failed: IMU {iid} inverted_axes must be a list of 3 booleans")
-                            return False
 
             # 3. IO Validation
             io_cfg = config.get('io', {})

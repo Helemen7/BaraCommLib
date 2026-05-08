@@ -2,9 +2,19 @@ import os
 import json
 import logging
 from typing import Tuple
+import sys
+
+# Suppress scary C++ TensorFlow warnings and info logs before importing TF
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
 
 try:
     import tensorflow as tf
+    tf.get_logger().setLevel('ERROR') # Suppress TF Python warnings
+    
+    # Suppress absl warnings (often used by TFLite converter)
+    import absl.logging
+    absl.logging.set_verbosity(absl.logging.ERROR)
+    
     from tensorflow.keras.applications import MobileNetV2
     from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
     from tensorflow.keras.models import Model
@@ -26,7 +36,9 @@ class AutoTrainer:
                          output_model_path: str = "robot_brain.tflite", 
                          epochs: int = 10,
                          image_size: Tuple[int, int] = (224, 224),
-                         batch_size: int = 32):
+                         batch_size: int = 32,
+                         fine_tune: bool = False,
+                         early_stop_at_98: bool = True):
         """
         Automatically trains a computer vision model using transfer learning.
         
@@ -36,6 +48,8 @@ class AutoTrainer:
             epochs: Number of training iterations
             image_size: Target resolution (must match what DatasetTool used)
             batch_size: Number of images to process at once
+            fine_tune: Perform a secondary fine-tuning phase
+            early_stop_at_98: Stop training early if accuracy reaches 98%
         """
         if not os.path.exists(dataset_folder):
             raise FileNotFoundError(f"Dataset folder '{dataset_folder}' not found.")
@@ -104,42 +118,85 @@ class AutoTrainer:
             metrics=['accuracy']
         )
 
+        callbacks = []
+        if early_stop_at_98:
+            # Custom callback to stop at 98% accuracy
+            class EarlyStopAt98(tf.keras.callbacks.Callback):
+                def on_epoch_end(self, epoch, logs=None):
+                    if logs is None:
+                        logs = {}
+                    # Check both accuracy and val_accuracy
+                    if logs.get('accuracy', 0) >= 0.98 and logs.get('val_accuracy', 0) >= 0.98:
+                        logging.info(f"\nReached 98% accuracy at epoch {epoch+1}. Stopping early to prevent overfitting!")
+                        self.model.stop_training = True
+
+            callbacks.append(EarlyStopAt98())
+
         logging.info(f"Starting training for {epochs} epochs...")
         
         model.fit(
             train_ds,
             validation_data=val_ds,
-            epochs=epochs
+            epochs=epochs,
+            callbacks=callbacks
         )
 
         # Fine tuning (optional, but greatly improves accuracy for similar objects)
-        logging.info("Fine-tuning top layers...")
-        base_model.trainable = True
-        # Freeze all but the last 20 layers
-        for layer in base_model.layers[:-20]:
-            layer.trainable = False
+        if fine_tune:
+            logging.info("Fine-tuning top layers...")
+            base_model.trainable = True
+            # Freeze all but the last 20 layers
+            for layer in base_model.layers[:-20]:
+                layer.trainable = False
 
-        model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), # Much slower learning rate
-            loss=tf.keras.losses.SparseCategoricalCrossentropy(),
-            metrics=['accuracy']
-        )
-        
-        model.fit(
-            train_ds,
-            validation_data=val_ds,
-            epochs=int(epochs * 0.5) # fewer epochs for fine tuning
-        )
+            model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), # Much slower learning rate
+                loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+                metrics=['accuracy']
+            )
+            
+            model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=max(1, int(epochs * 0.5)), # fewer epochs for fine tuning
+                callbacks=callbacks
+            )
 
         logging.info("Training complete. Converting to optimized TFLite model...")
         
-        converter = tf.lite.TFLiteConverter.from_keras_model(model)
-        # Optimize for speed / size
-        converter.optimizations = [tf.lite.Optimize.DEFAULT]
-        tflite_model = converter.convert()
+        # Save temporarily to disk to avoid 'NoneType' object is not callable in newer TF versions
+        import tempfile
+        import shutil
+        import sys
+        
+        temp_dir = tempfile.mkdtemp()
+        
+        # C-level stdout/stderr silencing to block absl and tf_tfl_flatbuffer_helpers C++ spam
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        old_stdout_fd = os.dup(1)
+        old_stderr_fd = os.dup(2)
+        
+        try:
+            os.dup2(devnull_fd, 1)
+            os.dup2(devnull_fd, 2)
+            
+            model.export(temp_dir)
+            converter = tf.lite.TFLiteConverter.from_saved_model(temp_dir)
+            # Optimize for speed / size
+            converter.optimizations = [tf.lite.Optimize.DEFAULT]
+            tflite_model = converter.convert()
 
-        with open(output_model_path, 'wb') as f:
-            f.write(tflite_model)
+            with open(output_model_path, 'wb') as f:
+                f.write(tflite_model)
+                
+        finally:
+            # Restore stdout/stderr and close devnull
+            os.dup2(old_stdout_fd, 1)
+            os.dup2(old_stderr_fd, 2)
+            os.close(old_stdout_fd)
+            os.close(old_stderr_fd)
+            os.close(devnull_fd)
+            shutil.rmtree(temp_dir, ignore_errors=True)
             
         logging.info(f"Model saved successfully to {output_model_path}")
         logging.info(f"Labels saved successfully to {labels_path}")

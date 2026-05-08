@@ -23,9 +23,11 @@ def main():
         AutoTrainer.train_classifier(
             dataset_folder=dataset_folder,
             output_model_path=output_model,
-            epochs=5, # Number of training passes. Increase to 10-20 for better accuracy
+            epochs=10, # Number of training passes. 
             image_size=(224, 224),
-            batch_size=16
+            batch_size=16,
+            fine_tune=False,       # Set to True to do a deeper learning pass (takes longer)
+            early_stop_at_98=True  # Automatically stops if accuracy hits 98%
         )
         print(f"\nTraining completed! Your model is saved as '{output_model}'.")
         print("You can now move this model to your Raspberry Pi.")
