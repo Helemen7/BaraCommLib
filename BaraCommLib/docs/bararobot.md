@@ -1,122 +1,122 @@
 # BaraRobot Class (High-Level API)
 
-La classe `BaraRobot` è l'entry point principale della libreria. È progettata per nascondere la complessità dell'hardware sottostante e offrire un'interfaccia "commercial-like", pulita, sicura e pronta all'uso.
+The `BaraRobot` class is the main entry point of the library. It is designed to hide the underlying hardware complexity and offer a "commercial-like", clean, safe, and ready-to-use interface.
 
-Una volta istanziato, `BaraRobot` legge automaticamente il file `baraconfig.yaml`, avvia i motori, fa il setup dei pin e lancia in background i thread di I2C per il caching super-veloce dei sensori.
+Once instantiated, `BaraRobot` automatically reads the `baraconfig.yaml` file, starts the motors, sets up the pins, and launches the background I2C threads for super-fast sensor caching.
 
 ```python
 from baracommlib.BaraRobot import BaraRobot
 
-# Inizializza tutto l'hardware definito nel YAML in modo automatico
+# Initializes all the hardware defined in the YAML automatically
 robot = BaraRobot("baraconfig.yaml")
 ```
 
 ---
 
-## 1. Motori e Drivetrain (`robot.drivetrain`)
-Il modulo `drivetrain` (basato sulla classe `Motors`) è pre-configurato e pronto all'uso.
-Tiene in considerazione la configurazione di motori invertiti fisicamente senza dover cambiare il codice logico.
+## 1. Motors and Drivetrain (`robot.drivetrain`)
+The `drivetrain` module (based on the `Motors` class) is pre-configured and ready to use.
+It takes into account physically inverted motor configurations (defined in the YAML) without requiring you to change your logical code.
 
 ```python
-# Movimenti di base
+# Basic movements
 robot.drivetrain.move_forward_action(speed=80)
 robot.drivetrain.turn_left_action(speed=50)
 
-# Frenata (Coast: stacca la corrente; Force Brake: frena elettricamente)
+# Braking (Coast: cuts power; Force Brake: shorts terminals to brake electrically)
 robot.drivetrain.coast()
 robot.drivetrain.force_brake(max_pwm_value=100)
 
-# Controllo manuale del singolo motore
+# Manual control of a single motor
 from baracommlib.Motors import Motor
 robot.drivetrain.assign_manual_power(Motor.A, power=70)
 ```
 
 ---
 
-## 2. Sensori: Accesso Istantaneo $O(1)$ (`robot.sensor`)
-La gestione dei sensori avviene in background. Quando chiami un metodo da `robot.sensor`, ottieni il valore **istantaneamente** dall'ultimo ciclo di lettura senza bloccare il thread principale (cruciale per algoritmi come i PID).
+## 2. Sensors: Instant $O(1)$ Access (`robot.sensor`)
+Sensor polling happens continuously in the background. When you call a method from `robot.sensor`, you get the value **instantly** from the last reading cycle without blocking the main thread (which is crucial for timing-sensitive algorithms like PIDs).
 
-L'interfaccia proxy di `robot.sensor` espone tre comodi metodi:
+The `robot.sensor` proxy interface exposes three handy methods:
 
 ### `get(sensor_id)`
-Ritorna il valore dell'ultimo campionamento del sensore specificato nel YAML tramite il suo ID univoco.
+Returns the value of the last sampling of the sensor specified in the YAML via its unique ID.
 
 ```python
-# Lettura frontale (ToF)
-distanza = robot.sensor.get("front") # Esempio: 152.0
+# Front reading (ToF)
+distance = robot.sensor.get("front") # Example: 152.0
 
-# Lettura giroscopica (IMU)
+# Gyro reading (IMU)
 gyro = robot.sensor.get("main_gyro")
-# Esempio: {"yaw": 45.1, "pitch": 0.2, "roll": 1.5}
+# Example: {"yaw": 45.1, "pitch": 0.2, "roll": 1.5}
 ```
 
 ### `get_by_direction(direction)`
-Se hai raggruppato più sensori sotto la stessa "direzione" nel YAML (es. due sensori diagonali `FRONT_LEFT` e `FRONT_RIGHT` mappati entrambi logicamente come `FRONT` per un sensore generale), puoi ottenere tutti i loro valori in un dizionario. Accetta stringhe ("front") o Enum.
+If you have grouped multiple sensors under the same "direction" in the YAML (e.g., two diagonal sensors `front_left` and `front_right` logically mapped as `front`), you can fetch all their values at once in a dictionary. It accepts strings ("front") or Enums.
 
 ```python
-valori_frontali = robot.sensor.get_by_direction("front")
-# Expected: {"front_dx": 120, "front_sx": 118}
+front_values = robot.sensor.get_by_direction("front")
+# Expected: {"front_right": 120, "front_left": 118}
 ```
 
 ### `get_average_by_direction(direction)`
-Prende tutti i sensori che puntano in una certa direzione, scarta quelli rotti (che ritornano `None`) ed esegue automaticamente una media matematica per darti una stima robusta e ripulita dal rumore o dai guasti hardware.
+Takes all sensors pointing in a specific direction, discards broken/disconnected ones (which return `None`), and automatically performs a mathematical average to give you a robust estimate cleansed of noise or individual hardware failures.
 
 ```python
-media_distanza = robot.sensor.get_average_by_direction("front")
-if media_distanza is not None and media_distanza < 100:
-    print("Muro vicino!")
+avg_distance = robot.sensor.get_average_by_direction("front")
+if avg_distance is not None and avg_distance < 100:
+    print("Wall nearby!")
 ```
 
 ---
 
-## 3. Gestione Eventi e Bottoni
-Non dovrai più inquinare il tuo loop principale con `if GPIO.input(PIN): ...` con il rischio di letture fluttuanti. La libreria gestisce per te il **debouncing** e il multithreading.
+## 3. Events and Button Management
+You no longer have to pollute your main loop with `if GPIO.input(PIN): ...` with the risk of floating readings. The library handles **debouncing** and multithreading for you.
 
-### Decoratore Asincrono
-Aggiungi `@robot.on_button_pressed` sopra a una funzione. La libreria creerà un thread dedicato per ascoltare in background le interazioni dell'utente in totale sicurezza.
+### Asynchronous Decorator
+Add `@robot.on_button_pressed` above a function. The library will create a dedicated thread to listen in the background for user interactions in total safety.
 
 ```python
 @robot.on_button_pressed("start")
-def avvia_routine():
-    print("Il robot ha rilevato il tocco dell'utente!")
-    # Qui il codice scatterà solo una volta per pressione, grazie al debouncing automatico.
+def start_routine():
+    print("The robot detected user input!")
+    # This code will only trigger once per press, thanks to automatic debouncing.
 ```
 
-### Lettura Sincrona
-Se preferisci controllare lo stato del bottone all'interno di uno statemachine, puoi usare la funzione sincrona:
+### Synchronous Reading
+If you prefer to check the button state within a state machine or your main loop, you can use the synchronous function:
 ```python
 if robot.is_button_pressed("start"):
-    print("Pulsante tenuto premuto in questo istante.")
+    print("Button is currently being held down.")
 ```
 
 ---
 
-## 4. Movimento Avanzato (Navigazione Relativa)
-Avendo integrato nativamente un layer di sensor fusion giroscopico, `BaraRobot` offre una comoda API per girare di gradi precisi sul posto.
+## 4. Advanced Movement (Relative Navigation)
+Having natively integrated a gyroscopic sensor fusion layer, `BaraRobot` offers a convenient API to turn by precise relative angles on the spot.
 
 ```python
-# Gira a DESTRA di 90 gradi con velocità 50.
-# Blocca l'esecuzione finché il turno non è completato con una precisione (tolleranza) di 2°.
+# Turns RIGHT by 90 degrees with speed 50.
+# Blocks execution until the turn is completed with a precision (tolerance) of 2°.
 robot.turn(angle=90.0, speed=50, tolerance=2.0)
 
-# Gira a SINISTRA di 45 gradi
+# Turns LEFT by 45 degrees
 robot.turn(angle=-45.0)
 ```
 
 ---
 
-## 5. Teardown e Pulizia Sicura (`cleanup`)
-Quando l'applicazione termina, è **obbligatorio** spegnere i motori e rilasciare le risorse I2C. `BaraRobot` integra una solida implementazione del garbage collection (`__del__`), il che significa che alla chiusura dello script la libreria tenta in autonomia di ripulire le risorse.
+## 5. Safe Teardown and Cleanup (`cleanup`)
+When the application terminates, it is **mandatory** to stop the motors and release the GPIO/I2C resources. `BaraRobot` integrates a solid garbage collection implementation (`__del__`), meaning that upon script closure, the library autonomously attempts to clean up resources.
 
-Tuttavia, è "best practice" chiamarlo esplicitamente alla fine del main loop. Questo garantisce che i motori non impazziscano continuando a ricevere vecchi segnali PWM in caso di crash.
+However, it is "best practice" to call it explicitly at the end of the main loop. This guarantees that motors won't go crazy continuing to receive old PWM signals in case of a software crash.
 
 ```python
 try:
     while True:
-        pass # Il tuo codice...
+        pass # Your code...
 except KeyboardInterrupt:
     pass
 finally:
-    # Ferma motori, spegne i thread sensori e ripulisce il GPIO
+    # Stops motors, kills sensor threads safely, and cleans up GPIO
     robot.cleanup()
 ```
