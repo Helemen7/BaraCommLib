@@ -1,4 +1,10 @@
-import RPi.GPIO as GPIO
+try:
+    import RPi.GPIO as GPIO
+except (ImportError, RuntimeError):
+    import logging
+    logging.warning("RPi.GPIO not found or not running on Raspberry Pi. Using Mock GPIO for development.")
+    from .mock_gpio import GPIO
+
 from typing import *
 from enum import Enum
 
@@ -16,6 +22,11 @@ class MotorIN:
     def set(self, state: Literal[0, 1]):
         GPIO.output(self.pin, state)
         self.lastState = state
+
+class MotorDirection(Enum):
+    # This represents difference between AIN1 and AIN2 etc
+    FORWARD=0
+    BACKWARD=1
 
 
 class Motors:
@@ -118,3 +129,37 @@ class Motors:
     
     def are_forced(self) -> bool:
         return self._is_forced
+    
+    def get_motor_state(self, motor: Motor, direction: MotorDirection) -> Literal[0, 1]:
+        """
+        Returns the actual motor assigned state read directly from the hardware pin.
+        """
+        if motor == Motor.A:
+            if direction == MotorDirection.FORWARD:
+                return GPIO.input(self.AIN1.pin)
+            elif direction == MotorDirection.BACKWARD:
+                return GPIO.input(self.AIN2.pin)
+        elif motor == Motor.B:
+            if direction == MotorDirection.FORWARD:
+                return GPIO.input(self.BIN1.pin)
+            elif direction == MotorDirection.BACKWARD:
+                return GPIO.input(self.BIN2.pin)
+        
+        raise RuntimeError(f"Invalid motor {motor} or direction {direction}")
+    
+    def health_check(self) -> bool:
+        """
+        Checks if all motor pins' actual hardware states match the last assigned states.
+        Returns True if healthy (synced), False if out of sync.
+        """
+        pins_to_check = [self.AIN1, self.AIN2, self.BIN1, self.BIN2]
+        
+        for motor_in in pins_to_check:
+            # Read the actual hardware state
+            actual_state = GPIO.input(motor_in.pin)
+            
+            # Compare with the internal software state
+            if actual_state != motor_in.lastState:
+                return False
+                
+        return True
