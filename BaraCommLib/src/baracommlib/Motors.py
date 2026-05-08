@@ -5,7 +5,7 @@ except (ImportError, RuntimeError):
     logging.warning("RPi.GPIO not found or not running on Raspberry Pi. Using Mock GPIO for development.")
     from .mock_gpio import GPIO
 
-from typing import *
+from typing import Literal
 from enum import Enum
 
 from .exceptions.MaxPowerExceededException import MaxPowerExceededException
@@ -141,14 +141,14 @@ class Motors:
         """
         if motor == Motor.A:
             if direction == MotorDirection.FORWARD:
-                return GPIO.input(self.AIN1.pin)
+                return 1 if GPIO.input(self.AIN1.pin) else 0
             elif direction == MotorDirection.BACKWARD:
-                return GPIO.input(self.AIN2.pin)
+                return 1 if GPIO.input(self.AIN2.pin) else 0
         elif motor == Motor.B:
             if direction == MotorDirection.FORWARD:
-                return GPIO.input(self.BIN1.pin)
+                return 1 if GPIO.input(self.BIN1.pin) else 0
             elif direction == MotorDirection.BACKWARD:
-                return GPIO.input(self.BIN2.pin)
+                return 1 if GPIO.input(self.BIN2.pin) else 0
         
         raise RuntimeError(f"Invalid motor {motor} or direction {direction}")
     

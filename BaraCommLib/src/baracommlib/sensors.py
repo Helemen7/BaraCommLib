@@ -3,7 +3,7 @@ import time
 import logging
 import math
 from enum import Enum
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Type, Union
 
 try:
     import board
@@ -332,6 +332,7 @@ class SensorsManager:
     Handles complex logic like sequential XSHUT toggling to prevent address collisions.
     """
     def __init__(self, config: dict):
+        """Already initializes sensors and buses, no need to do it externally"""
         self.config = config
         self.buses = {}
         self.sensors: Dict[str, AbstractSensor] = {}
@@ -342,7 +343,7 @@ class SensorsManager:
         self._init_buses()
         self._init_sensors()
         
-    def _build_dynamic_direction_enum(self) -> Enum:
+    def _build_dynamic_direction_enum(self) -> Type[Enum]:
         directions_set = set()
         sensors_cfg = self.config.get("sensors", {})
         
@@ -421,13 +422,34 @@ class SensorsManager:
             return sensor.get_value()
         return None
 
-    def get_readings_by_direction(self, direction: Enum) -> Dict[str, Any]:
+    def get_readings_by_direction(self, direction: Union[Enum, str]) -> Dict[str, Any]:
         """Returns a dict of all sensors pointing in a specific direction and their values."""
+        if isinstance(direction, str):
+            direction = getattr(self.Direction, direction.upper(), None)
+            
         results = {}
         for sid, sensor in self.sensors.items():
             if getattr(sensor, "direction", None) == direction:
                 results[sid] = sensor.get_value()
         return results
+
+    def get_average_by_direction(self, direction: Union[Enum, str]) -> Optional[float]:
+        """
+        Returns the mathematical average of all valid numerical readings 
+        for sensors pointing in the specified direction.
+        Returns None if no valid numerical readings are available.
+        """
+        readings = self.get_readings_by_direction(direction)
+        
+        valid_values = []
+        for val in readings.values():
+            if val is not None and isinstance(val, (int, float)):
+                valid_values.append(val)
+                
+        if not valid_values:
+            return None
+            
+        return sum(valid_values) / len(valid_values)
 
     def stop_all(self):
         """Stops all sensor threads."""
