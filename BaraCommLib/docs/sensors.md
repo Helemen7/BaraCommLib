@@ -51,3 +51,38 @@ age = my_sensor.get_reading_age()
 if age > 0.5:
     print("Warning: The front sensor thread hasn't responded for half a second!")
 ```
+
+## IMU / Gyroscope Features
+
+The library ships with a highly customizable and unified interface for Inertial Measurement Units (IMUs), implemented in the `IMUSensor` class. 
+
+### Supported Models
+
+- **BNO055** and **BNO085**: High-end sensors with built-in hardware Sensor Fusion. The library automatically fetches and normalizes the absolute Euler angles calculated natively by the chip's internal co-processor.
+- **MPU6050**: An entry-level 6-DOF IMU that strictly provides raw Accelerometer and Gyroscope data. Since it lacks a hardware compass or fusion processor, the `IMUSensor` class natively implements a **Software Complementary Filter** running under the hood in the polling thread. It fuses the Accelerometer gravity vectors (for absolute Pitch/Roll stability) with the Gyroscope integrations (for fast response and Yaw tracking), meaning your application code will never have to perform complex math.
+
+### Axis Mapping and Inversions
+
+Physical orientation inside your robot chassis often differs from the sensor board's standard axes. The library allows arbitrary mappings and inversions so that `{"yaw": ..., "pitch": ..., "roll": ...}` always match your robot's coordinate frame, strictly wrapped continuously between `0` and `360` degrees.
+
+This is managed entirely via the `baraconfig.yaml` configuration using two parameters:
+- `axis_mapping`: A list like `[0, 1, 2]` which remaps the raw `(Yaw, Pitch, Roll)` variables to different indices. 
+- `inverted_axes`: A list like `[False, True, False]` to negate angles.
+
+### Gyroscope Example Usage
+
+```python
+# Assuming you named your IMU 'main_gyro' in your YAML file
+gyro_reading = sensors.get_reading("main_gyro")
+
+if gyro_reading:
+    yaw = gyro_reading["yaw"]
+    pitch = gyro_reading["pitch"]
+    roll = gyro_reading["roll"]
+    
+    print(f"Current Robot Heading: {yaw:.1f}°")
+    
+    # Simple threshold logic without doing complex vector math
+    if pitch > 30.0 and pitch < 180.0:
+        print("Warning: Robot is climbing a steep incline!")
+```
