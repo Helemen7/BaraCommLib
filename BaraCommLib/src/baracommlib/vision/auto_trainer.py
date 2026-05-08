@@ -23,7 +23,7 @@ class AutoTrainer:
     @classmethod
     def train_classifier(cls, 
                          dataset_folder: str, 
-                         output_model_path: str = "robot_model.tflite", 
+                         output_model_path: str = "robot_brain.tflite", 
                          epochs: int = 10,
                          image_size: Tuple[int, int] = (224, 224),
                          batch_size: int = 32):

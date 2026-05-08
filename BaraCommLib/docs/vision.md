@@ -42,7 +42,7 @@ DatasetTool.generate(
 ```
 
 > [!TIP]
-> Setting `create_background_class=True` is highly recommended. It prevents your robot from giving false positives when neither the ball nor the can are in the camera's view.
+> Setting `create_background_class=True` is highly recommended. It prevents your robot from giving false positives when neither the classes are recognized. 
 
 ---
 
