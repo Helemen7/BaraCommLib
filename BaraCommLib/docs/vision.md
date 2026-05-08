@@ -5,7 +5,7 @@ Training neural networks and running them efficiently on ARM processors is usual
 
 We abstracted all this complexity away. You can now generate datasets, train a lightweight transfer-learning model, and run $O(1)$ real-time classifications using fewer than 5 lines of code.
 
-> [!INFO]
+> [!NOTE]
 > The Vision module is divided into two distinct parts:
 > 1. **PC Tools**: `DatasetTool` and `AutoTrainer` (Used on your powerful computer to prepare the AI).
 > 2. **Robot API**: The `robot.vision` object (Used on the Raspberry Pi for instant inference).
@@ -61,7 +61,7 @@ AutoTrainer.train_classifier(
 )
 ```
 
-> [!SUCCESS]
+> [!IMPORTANT]
 > The script will output two files: `robot_brain.tflite` (the optimized Neural Network) and `robot_brain_labels.json` (the text names of your classes). Copy **both** of these files to your Raspberry Pi!
 
 ---
