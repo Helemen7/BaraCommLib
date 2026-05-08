@@ -1,6 +1,7 @@
 import threading
 import time
 import logging
+import math
 from enum import Enum
 from typing import Dict, Any, Optional
 
@@ -208,6 +209,123 @@ class ToFSensor(AbstractSensor):
         return self.get_value() # Keep old value if data isn't ready
 
 
+class IMUSensor(AbstractSensor):
+    """
+    Implementation for MPU6050, BNO055, BNO085 Inertial Measurement Units.
+    """
+    def __init__(self, config_node: dict, i2c_bus, direction_enum_cls):
+        super().__init__(config_node, i2c_bus)
+        self.model = config_node.get("model", "BNO085")
+        
+        # Optional direction for IMU
+        dir_str = config_node.get("direction", "UNKNOWN").upper()
+        self.direction = getattr(direction_enum_cls, dir_str, getattr(direction_enum_cls, "UNKNOWN", None))
+        
+        self.address = config_node.get("address")
+        self.axis_mapping = config_node.get("axis_mapping", [0, 1, 2])
+        self.inverted_axes = config_node.get("inverted_axes", [False, False, False])
+        
+        # Internal variables for MPU6050 software sensor fusion
+        self._last_time = time.time()
+        self._mpu_yaw = 0.0
+        self._mpu_pitch = 0.0
+        self._mpu_roll = 0.0
+        
+    def _initialize_hardware(self):
+        try:
+            if self.model == "MPU6050":
+                import mpu6050
+                # mpu6050 uses its own standard i2c implementation in this specific library
+                addr = self.address if self.address else 0x68
+                self._sensor_instance = mpu6050.mpu6050(addr)
+                
+            elif self.model == "BNO055":
+                import adafruit_bno055
+                addr = self.address if self.address else 0x28
+                self._sensor_instance = adafruit_bno055.BNO055_I2C(self.i2c_bus, address=addr)
+                
+            elif self.model == "BNO085":
+                from adafruit_bno08x.i2c import BNO08X_I2C
+                from adafruit_bno08x import BNO_REPORT_EULER
+                addr = self.address if self.address else 0x4A
+                self._sensor_instance = BNO08X_I2C(self.i2c_bus, address=addr)
+                self._sensor_instance.enable_feature(BNO_REPORT_EULER)
+                
+            else:
+                raise ValueError(f"Unsupported IMU model: {self.model}")
+        except Exception as e:
+            logging.error(f"Failed to initialize IMU {self.model} on {self.sensor_id}: {e}")
+            self._sensor_instance = None
+            
+    def _read_hardware(self) -> Any:
+        if not self._sensor_instance:
+            return {"yaw": 0.0, "pitch": 0.0, "roll": 0.0} # Mock fallback
+            
+        raw_tuple = (0.0, 0.0, 0.0)
+        
+        try:
+            if self.model == "MPU6050":
+                # MPU6050 lacks a compass. We use a software Complementary Filter 
+                # fusing Accelerometer (for stable Pitch/Roll) and Gyro (for fast response and Yaw integration)
+                accel = self._sensor_instance.get_accel_data()
+                gyro = self._sensor_instance.get_gyro_data()
+                
+                current_time = time.time()
+                dt = current_time - self._last_time
+                self._last_time = current_time
+                
+                # Calculate absolute Pitch and Roll from gravity vector (Accelerometer)
+                # accel values are in g. 
+                acc_pitch = math.degrees(math.atan2(accel['y'], math.sqrt(accel['x']**2 + accel['z']**2)))
+                acc_roll = math.degrees(math.atan2(-accel['x'], accel['z']))
+                
+                # Fast complementary filter (98% gyro, 2% accelerometer)
+                self._mpu_pitch = 0.98 * (self._mpu_pitch + gyro['x'] * dt) + 0.02 * acc_pitch
+                self._mpu_roll = 0.98 * (self._mpu_roll + gyro['y'] * dt) + 0.02 * acc_roll
+                
+                # Yaw has no absolute reference (no compass), so it's pure integration (subject to slow drift)
+                self._mpu_yaw += gyro['z'] * dt
+                
+                raw_tuple = (self._mpu_yaw, self._mpu_pitch, self._mpu_roll)
+                
+            elif self.model == "BNO055":
+                # BNO055 has hardware Sensor Fusion (Accel + Gyro + Magnetometer)
+                euler = self._sensor_instance.euler
+                if euler and None not in euler:
+                    # Usually returns (heading/yaw, roll, pitch)
+                    raw_tuple = (euler[0], euler[2], euler[1])
+                else:
+                    return self.get_value()
+                
+            elif self.model == "BNO085":
+                # BNO085 has advanced hardware Sensor Fusion
+                euler = self._sensor_instance.euler
+                if euler and None not in euler:
+                    raw_tuple = euler 
+                else:
+                    return self.get_value()
+                    
+        except Exception as e:
+            logging.error(f"Error reading IMU {self.model}: {e}")
+            return self.get_value() # Keep old valid value if I2C fails
+            
+        # 1. Apply user-defined Axis Mapping
+        mapped_yaw = raw_tuple[self.axis_mapping[0]]
+        mapped_pitch = raw_tuple[self.axis_mapping[1]]
+        mapped_roll = raw_tuple[self.axis_mapping[2]]
+        
+        # 2. Apply user-defined Inversions
+        if self.inverted_axes[0]: mapped_yaw = -mapped_yaw
+        if self.inverted_axes[1]: mapped_pitch = -mapped_pitch
+        if self.inverted_axes[2]: mapped_roll = -mapped_roll
+        
+        # 3. Strictly wrap angles to 0-360 degrees
+        return {
+            "yaw": mapped_yaw % 360.0,
+            "pitch": mapped_pitch % 360.0,
+            "roll": mapped_roll % 360.0
+        }
+
 class SensorsManager:
     """
     High-level manager that initializes multiple sensors across multiple I2C buses.
@@ -283,6 +401,14 @@ class SensorsManager:
             sensor.start()
             # Give it time to change its address before booting the next one
             time.sleep(0.05) 
+                
+        # 3. Instantiate IMUs
+        for imu_cfg in sensors_cfg.get("imu", []):
+            bus_id = imu_cfg.get("bus")
+            if bus_id in self.buses:
+                sensor = IMUSensor(imu_cfg, self.buses[bus_id], self.Direction)
+                self.sensors[sensor.sensor_id] = sensor
+                sensor.start()
                 
     def get_sensor(self, sensor_id: str) -> Optional[AbstractSensor]:
         """Gets the sensor object itself."""

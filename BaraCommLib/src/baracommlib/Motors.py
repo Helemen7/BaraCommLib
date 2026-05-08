@@ -45,6 +45,11 @@ class Motors:
         self.BIN1 = MotorIN(rightB["in1"])
         self.BIN2 = MotorIN(rightB["in2"])
 
+        if drivetrain_config["motors"]["left"]["mounted_backwards"]:
+            self.AIN1, self.AIN2 = self.AIN2, self.AIN1 # fantainformatica (@GioCba)
+        if drivetrain_config["motors"]["right"]["mounted_backwards"]:
+            self.BIN1, self.BIN2 = self.BIN2, self.BIN1
+        
         self.PWMA = leftA["pwm"]
         self.PWMB = rightB["pwm"]
 

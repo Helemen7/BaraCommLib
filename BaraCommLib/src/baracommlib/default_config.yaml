@@ -65,7 +65,10 @@ sensors:
       model: "BNO085" # e.g., MPU6050, BNO055, BNO085
       bus: "i2c_1"  # Should normally be i2c_X. Default is 1, but if you created a custom bus you should write it here.
       address: 0x4A
-      inverted_axes: [false, false, true] # [X, Y, Z] inversion if mounted upside down
+      # Maps the physical axes of the sensor to the robot's Logical [Yaw, Pitch, Roll]. 
+      # 0=X, 1=Y, 2=Z. If your sensor is mounted sideways, you might need [2, 1, 0] or similar.
+      axis_mapping: [0, 1, 2] 
+      inverted_axes: [false, false, true] # [Yaw, Pitch, Roll] inversion after mapping
 
 io:
   buttons:

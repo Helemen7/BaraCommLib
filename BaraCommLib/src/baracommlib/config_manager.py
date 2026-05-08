@@ -169,10 +169,28 @@ class ConfigManager:
                     iid = imu.get('id')
                     ctx = f"sensors.imu[{iid}]"
                     
+                    if not self._validate_field(imu, 'direction', str, context=ctx, required=False): return False
+                    
                     bus_id = imu.get('bus')
                     if bus_id not in defined_buses:
                         print(f"Config validation failed: IMU {iid} uses undefined bus '{bus_id}'")
                         return False
+                    
+                    if 'address' in imu:
+                        if not _register_i2c_address(bus_id, imu['address'], f"imu_{iid}"):
+                            return False
+                            
+                    if 'axis_mapping' in imu:
+                        am = imu['axis_mapping']
+                        if not isinstance(am, list) or len(am) != 3 or not all(isinstance(x, int) and 0 <= x <= 2 for x in am):
+                            print(f"Config validation failed: IMU {iid} axis_mapping must be a list of 3 integers (0, 1, or 2)")
+                            return False
+
+                    if 'inverted_axes' in imu:
+                        inv = imu['inverted_axes']
+                        if not isinstance(inv, list) or len(inv) != 3:
+                            print(f"Config validation failed: IMU {iid} inverted_axes must be a list of 3 booleans")
+                            return False
                     
                     if 'address' in imu:
                         if not _register_i2c_address(bus_id, imu['address'], f"imu_{iid}"):
