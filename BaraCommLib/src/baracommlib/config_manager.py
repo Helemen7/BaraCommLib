@@ -142,15 +142,13 @@ class ConfigManager:
                        not _register_pin(bus['sda_pin'], f"bus_{bid}_sda"):
                         return False
 
-            allowed_directions = ["front", "left", "right", "back"]
-
             if 'tof' in sensors:
                 allowed_tof = ["VL53L0X", "VL53L1X", "VL53L4CD"]
                 for tof in sensors['tof']:
                     tid = tof.get('id')
                     ctx = f"sensors.tof[{tid}]"
                     
-                    if not self._validate_field(tof, 'direction', str, allowed_values=allowed_directions, context=ctx): return False
+                    if not self._validate_field(tof, 'direction', str, context=ctx): return False
                     if not self._validate_field(tof, 'model', str, allowed_values=allowed_tof, required=False, context=ctx): return False
                     
                     bus_id = tof.get('bus')
