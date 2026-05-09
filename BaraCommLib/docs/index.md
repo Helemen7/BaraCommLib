@@ -8,10 +8,11 @@ Welcome to the hyper-detailed documentation of **BaraCommLib**. This library is 
 ## Documentation Index
 1. [BaraRobot Class (High-Level API)](bararobot.md) - **Start Here!**
 2. [Computer Vision & AI (`vision.md`)](vision.md) - **New!** Add AI to your robot in 5 lines of code.
-3. [Configuration Management (`config_manager.py`)](configuration.md)
-4. [Motor Control and Drivetrain (`Motors.py`)](motors.md)
-5. [Asynchronous Sensors and I2C (`sensors.py`)](sensors.md)
-6. [PC Development and Mocking (`mock_gpio.py`)](development.md)
+3. [Fail-Safe & Sensor Recovery (`fail_safe.md`)](fail_safe.md) - **New!** Automatic crash detection and robot safety.
+4. [Configuration Management (`config_manager.py`)](configuration.md)
+5. [Motor Control and Drivetrain (`Motors.py`)](motors.md)
+6. [Asynchronous Sensors and I2C (`sensors.py`)](sensors.md)
+7. [PC Development and Mocking (`mock_gpio.py`)](development.md)
 
 ## Library Philosophy
 - **Fail Fast, Fail Safe**: If you misconfigure a pin (e.g., two components share the same pin), the library immediately raises an exception at boot, long before the robot can move or cause damage.

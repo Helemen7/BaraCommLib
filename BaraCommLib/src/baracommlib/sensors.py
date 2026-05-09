@@ -3,6 +3,7 @@ import time
 import logging
 import math
 from enum import Enum
+from typing import cast
 from typing import Dict, Any, Optional, Type, Union
 
 try:
@@ -48,10 +49,14 @@ class AbstractSensor:
     Highly abstract base class for any sensor. 
     It handles background polling in a dedicated thread so reads are instantaneous.
     """
-    def __init__(self, config_node: dict, i2c_bus=None):
+    def __init__(self, config_node: dict, i2c_bus=None, sensor_type: str = "unknown", bus_id: str = "unknown", on_critical_failure = None):
         self.config = config_node
         self.sensor_id = config_node.get("id", "unknown")
         self.i2c_bus = i2c_bus
+        
+        self.sensor_type = sensor_type
+        self.bus_id = bus_id
+        self.on_critical_failure = on_critical_failure
         
         self._lock = threading.Lock()
         self._latest_reading: Optional[SensorReading] = None
@@ -100,16 +105,41 @@ class AbstractSensor:
         self._poll_rate = rate_seconds
         
     def _polling_loop(self):
+        consecutive_errors = 0
+        first_error_time = None
+        
         while self._running:
             if not self._paused:
                 try:
                     val = self._read_hardware()
                     with self._lock:
                         self._latest_reading = SensorReading(val, time.time(), is_valid=True)
+                    if consecutive_errors > 0:
+                        logging.info(f"Sensor {self.sensor_id} recovered after {consecutive_errors} errors.")
+                        consecutive_errors = 0
+                        first_error_time = None
                 except Exception as e:
-                    logging.error(f"Error reading sensor {self.sensor_id}: {e}")
+                    consecutive_errors += 1
+                    if first_error_time is None:
+                        first_error_time = time.time()
+                        
+                    logging.error(f"Error reading sensor {self.sensor_id} (x{consecutive_errors}): {e}")
                     with self._lock:
                         self._latest_reading = SensorReading(None, time.time(), is_valid=False)
+                        
+                    # Check for 5 second continuous failure
+                    if time.time() - first_error_time >= 5.0:
+                        logging.critical(f"Sensor {self.sensor_id} failed for 5+ seconds! Triggering fail-safe reinit.")
+                        if self.on_critical_failure:
+                            # Run in background to not block the thread dying
+                            threading.Thread(target=self.on_critical_failure, args=(self.sensor_type, self.bus_id)).start()
+                        first_error_time = None # Reset to avoid spamming
+                        self._running = False # Kill this thread as it will be reinitialized
+                        break
+                        
+                    # Exponential backoff maxing out at 5 seconds
+                    time.sleep(min(5.0, self._poll_rate * (1.5 ** consecutive_errors)))
+                    continue
             time.sleep(self._poll_rate)
             
     def get_value(self) -> Any:
@@ -130,8 +160,8 @@ class ToFSensor(AbstractSensor):
     """
     Implementation for VL53L0X, VL53L1X, VL53L4CD Time of Flight sensors.
     """
-    def __init__(self, config_node: dict, i2c_bus, direction_enum_cls):
-        super().__init__(config_node, i2c_bus)
+    def __init__(self, config_node: dict, i2c_bus, direction_enum_cls, sensor_type: str = "unknown", bus_id: str = "unknown", on_critical_failure = None):
+        super().__init__(config_node, i2c_bus, sensor_type=sensor_type, bus_id=bus_id, on_critical_failure=on_critical_failure)
         self.model = config_node.get("model", "VL53L1X")
         
         # Resolve the string direction to the dynamically built Enum
@@ -213,8 +243,8 @@ class IMUSensor(AbstractSensor):
     """
     Implementation for MPU6050, BNO055, BNO085 Inertial Measurement Units.
     """
-    def __init__(self, config_node: dict, i2c_bus, direction_enum_cls):
-        super().__init__(config_node, i2c_bus)
+    def __init__(self, config_node: dict, i2c_bus, direction_enum_cls, sensor_type: str = "unknown", bus_id: str = "unknown", on_critical_failure = None):
+        super().__init__(config_node, i2c_bus, sensor_type=sensor_type, bus_id=bus_id, on_critical_failure=on_critical_failure)
         self.model = config_node.get("model", "BNO085")
         
         # Optional direction for IMU
@@ -331,9 +361,10 @@ class SensorsManager:
     High-level manager that initializes multiple sensors across multiple I2C buses.
     Handles complex logic like sequential XSHUT toggling to prevent address collisions.
     """
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, stop_robot_callback=None):
         """Already initializes sensors and buses, no need to do it externally"""
         self.config = config
+        self.stop_robot_callback = stop_robot_callback
         self.buses = {}
         self.sensors: Dict[str, AbstractSensor] = {}
         
@@ -385,6 +416,43 @@ class SensorsManager:
             else:
                 logging.error(f"Could not resolve SCL/SDA pins for bus {bid}")
 
+    def _handle_sensor_failure(self, sensor_type: str, bus_id: str):
+        if self.stop_robot_callback:
+            logging.critical("Stopping drivetrain due to sensor failure...")
+            self.stop_robot_callback()
+            
+        logging.critical(f"Reinitializing all {sensor_type} sensors on I2C bus '{bus_id}'...")
+        
+        # Stop and remove existing sensors of this type on this bus
+        to_remove = []
+        for sid, sensor in self.sensors.items():
+            if sensor.sensor_type == sensor_type and sensor.bus_id == bus_id:
+                sensor.stop()
+                to_remove.append(sid)
+                
+        for sid in to_remove:
+            del self.sensors[sid]
+            
+        sensors_cfg = self.config.get("sensors", {})
+        
+        if sensor_type == "tof":
+            tof_sensors = []
+            for tof_cfg in sensors_cfg.get("tof", []):
+                if tof_cfg.get("bus") == bus_id:
+                    sensor = ToFSensor(tof_cfg, self.buses[bus_id], self.Direction, sensor_type="tof", bus_id=bus_id, on_critical_failure=self._handle_sensor_failure)
+                    self.sensors[sensor.sensor_id] = sensor
+                    tof_sensors.append(sensor)
+            for sensor in tof_sensors:
+                sensor.start()
+                time.sleep(0.05)
+                
+        elif sensor_type == "imu":
+            for imu_cfg in sensors_cfg.get("imu", []):
+                if imu_cfg.get("bus") == bus_id:
+                    sensor = IMUSensor(imu_cfg, self.buses[bus_id], self.Direction, sensor_type="imu", bus_id=bus_id, on_critical_failure=self._handle_sensor_failure)
+                    self.sensors[sensor.sensor_id] = sensor
+                    sensor.start()
+
     def _init_sensors(self):
         sensors_cfg = self.config.get("sensors", {})
         
@@ -393,7 +461,7 @@ class SensorsManager:
         for tof_cfg in sensors_cfg.get("tof", []):
             bus_id = tof_cfg.get("bus")
             if bus_id in self.buses:
-                sensor = ToFSensor(tof_cfg, self.buses[bus_id], self.Direction)
+                sensor = ToFSensor(tof_cfg, self.buses[bus_id], self.Direction, sensor_type="tof", bus_id=bus_id, on_critical_failure=self._handle_sensor_failure)
                 self.sensors[sensor.sensor_id] = sensor
                 tof_sensors.append(sensor)
                 
@@ -407,7 +475,7 @@ class SensorsManager:
         for imu_cfg in sensors_cfg.get("imu", []):
             bus_id = imu_cfg.get("bus")
             if bus_id in self.buses:
-                sensor = IMUSensor(imu_cfg, self.buses[bus_id], self.Direction)
+                sensor = IMUSensor(imu_cfg, self.buses[bus_id], self.Direction, sensor_type="imu", bus_id=bus_id, on_critical_failure=self._handle_sensor_failure)
                 self.sensors[sensor.sensor_id] = sensor
                 sensor.start()
                 
@@ -425,7 +493,8 @@ class SensorsManager:
     def get_readings_by_direction(self, direction: Union[Enum, str]) -> Dict[str, Any]:
         """Returns a dict of all sensors pointing in a specific direction and their values."""
         if isinstance(direction, str):
-            direction = getattr(self.Direction, direction.upper(), None)
+            fallback = list(self.Direction)[0] if self.Direction else None
+            direction = cast(Enum, getattr(self.Direction, direction.upper(), fallback))
             
         results = {}
         for sid, sensor in self.sensors.items():

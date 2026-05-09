@@ -1,5 +1,8 @@
 # Asynchronous Sensors (`sensors.py`)
 
+> [!NOTE]
+> For details on automatic crash recovery and fail-safe behavior when sensors fail continuously for 5+ seconds, see the dedicated [Fail-Safe System documentation](fail_safe.md).
+
 Reading data from the I2C bus is an inherently "slow" operation compared to the clock cycles of a modern Raspberry Pi. Executing consecutive readings of three ToF sensors in the main thread could take 60-100ms, ruining the performance of a line-follower robot's PID controller or the timing of camera-based visual analysis.
 
 The `SensorsManager` class radically solves this problem by using Threading.

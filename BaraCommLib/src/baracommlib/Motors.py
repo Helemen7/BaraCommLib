@@ -122,6 +122,10 @@ class Motors:
         self.BIN2.set(GPIO.HIGH)
         self.pwm_a.ChangeDutyCycle(max_pwm_value)
         self.pwm_b.ChangeDutyCycle(max_pwm_value)
+
+    def stop(self):
+        """Stops the drivetrain safely (same as coast). Used by fail-safe recovery."""
+        self.coast()
     
     def assign_manual_power(self, motor: Motor, power: int):
         if power > self.config["drivetrain"]["max_pwm_value"]:

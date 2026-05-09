@@ -45,3 +45,48 @@ except RuntimeError as e:
     print(f"Critical configuration error: {e}")
     # Shut down the system
 ```
+
+---
+
+## Color Tracking Configuration
+
+> [!NOTE]
+> The Color Tracking feature is optional. If disabled, the configuration can be omitted entirely.
+
+The `vision.color_tracking` section allows you to define custom HSV or BGR/RGB bounds for color detection. This is useful for overriding the default presets or adding new colors specific to your task.
+
+### Structure
+
+```yaml
+vision:
+  color_tracking:
+    enabled: true  # Set to false to disable (or omit this section entirely)
+    colors:
+      custom_red:
+        hsv:
+          lower: [0, 120, 70]
+          upper: [10, 255, 255]
+        bgr:
+          lower: [0, 0, 150]
+          upper: [100, 100, 255]
+```
+
+### Validation Rules
+
+The `ConfigManager` enforces strict validation on color tracking settings:
+
+1. **Valid Color Spaces**: Only `hsv`, `bgr`, or `rgb` are allowed as color space keys.
+2. **Bounds Required**: Each color space must define both `lower` and `upper` bounds.
+3. **Tuple Size**: Both bounds must be arrays of exactly **3 integers** (representing the 3 channels).
+
+> [!WARNING]
+> If you provide invalid bounds (e.g., wrong number of channels), the robot will refuse to start and print a validation error.
+
+### Default Presets
+
+If you don't define any custom colors, the `ColorTracker` automatically uses these built-in presets (available in both HSV and BGR):
+
+- `red`, `green`, `blue`, `yellow`, `orange`, `purple`, `cyan`, `magenta`, `white`, `black`
+
+> [!TIP]
+> The built-in presets are optimized for general-purpose use. Only override them if your lighting conditions are unusual or you need very specific color thresholds.

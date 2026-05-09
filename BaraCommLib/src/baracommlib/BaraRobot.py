@@ -33,10 +33,10 @@ class BaraRobot:
         config_manager = ConfigManager(config_filepath)
         self.config = config_manager.load_and_validate()
 
-        self.sensors_manager = SensorsManager(self.config)
-        self.sensor = _SensorProxy(self.sensors_manager)
-        
         self.drivetrain = Motors(self.config)
+        
+        self.sensors_manager = SensorsManager(self.config, stop_robot_callback=self.drivetrain.stop)
+        self.sensor = _SensorProxy(self.sensors_manager)
         
         # Initialize vision if enabled
         vision_cfg = self.config.get("vision", {})
