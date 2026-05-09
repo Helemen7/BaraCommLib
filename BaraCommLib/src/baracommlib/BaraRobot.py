@@ -119,7 +119,7 @@ class BaraRobot:
         return decorator
 
     def _button_listener(self, btn_cfg: dict, callback: Callable):
-        pin: int = btn_cfg.get("pin")
+        pin: int = int(btn_cfg.get("pin", 0))
         pull = btn_cfg.get("pull", "none").lower()
         debounce_ms = btn_cfg.get("debounce_ms", 50)
         
