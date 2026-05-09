@@ -12,6 +12,7 @@ except (ImportError, RuntimeError):
 from .config_manager import ConfigManager
 from .sensors import SensorsManager
 from .Motors import Motors
+from .io import IOManager
 from .vision.vision_manager import VisionManager
 
 class _SensorProxy:
@@ -44,6 +45,9 @@ class BaraRobot:
             self.vision = VisionManager()
         else:
             self.vision = None
+            
+        # Initialize IO (LEDs, buzzers)
+        self.io = IOManager(self.config)
         
         self._button_callbacks = {}
         self._button_threads = []

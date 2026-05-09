@@ -86,6 +86,11 @@ io:
       pin: 2
       pwm: false # Set to true if it's a breathing/dimmable LED controlled with PWM
 
+  buzzers:
+    # Buzzers/Piezo speakers
+    - id: "alarm"
+      pin: 3
+
 vision:
   # Computer Vision subsystem (Background camera polling & TFLite inference)
   enabled: false 

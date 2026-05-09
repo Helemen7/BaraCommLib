@@ -339,6 +339,75 @@ class IMUSensor(AbstractSensor):
             logging.error(f"Error reading IMU {self.model}: {e}")
             return self.get_value() # Keep old valid value if I2C fails
             
+    def calibrate(self, samples: int = 100, delay_ms: int = 10):
+        """
+        Calibrate the IMU by computing offsets.
+        
+        Call this with the robot perfectly still!
+        
+        Args:
+            samples: Number of readings to average for calibration
+            delay_ms: Delay between samples
+            
+        Returns:
+            Dict with computed offsets (yaw_offset, pitch_offset, roll_offset)
+        """
+        import logging
+        logging.info(f"Calibrating {self.sensor_id}... Keep robot perfectly still!")
+        
+        offsets = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0}
+        
+        for _ in range(samples):
+            raw = self._read_raw()
+            if raw:
+                offsets["yaw"] += raw[0]
+                offsets["pitch"] += raw[1]
+                offsets["roll"] += raw[2]
+            time.sleep(delay_ms / 1000.0)
+            
+        # Average
+        offsets["yaw"] /= samples
+        offsets["pitch"] /= samples
+        offsets["roll"] /= samples
+        
+        # Store as calibration offset
+        self._calibration_offsets = offsets
+        logging.info(f"Calibration complete: {offsets}")
+        
+        return offsets
+        
+    def reset_orientation(self):
+        """Reset the current orientation as zero (home position)."""
+        current = self.get_value()
+        if current:
+            self._zero_offset = {
+                "yaw": current.get("yaw", 0),
+                "pitch": current.get("pitch", 0),
+                "roll": current.get("roll", 0)
+            }
+            
+    def get_value_adjusted(self) -> Optional[Dict[str, float]]:
+        """Get reading with calibration and zero offset applied."""
+        current = self.get_value()
+        if not current:
+            return None
+            
+        result = current.copy()
+        
+        # Apply calibration offsets if available
+        if hasattr(self, "_calibration_offsets") and self._calibration_offsets:
+            result["yaw"] -= self._calibration_offsets["yaw"]
+            result["pitch"] -= self._calibration_offsets["pitch"]
+            result["roll"] -= self._calibration_offsets["roll"]
+            
+        # Apply zero offset if available
+        if hasattr(self, "_zero_offset") and self._zero_offset:
+            result["yaw"] = (result["yaw"] - self._zero_offset["yaw"]) % 360.0
+            result["pitch"] = (result["pitch"] - self._zero_offset["pitch"]) % 360.0
+            result["roll"] = (result["roll"] - self._zero_offset["roll"]) % 360.0
+            
+        return result
+            
         # 1. Apply user-defined Axis Mapping
         mapped_yaw = raw_tuple[self.axis_mapping[0]]
         mapped_pitch = raw_tuple[self.axis_mapping[1]]

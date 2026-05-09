@@ -1,54 +1,80 @@
-# Motor Control (Drivetrain)
+# Motors & Movement
 
-The `Motors.py` file exposes the `Motors` class, designed to interface with standard H-Bridge motor drivers (like L298N or L293D) via the `RPi.GPIO` library.
+## Basic Actions
 
-## Architecture and Safety
+The `Motors` class provides low-level motor control:
 
-The class is built with two intrinsic safety layers:
+```python
+robot = BaraRobot()
 
-1.  **Safety Clamping (Soft-Limit)**: Every time you call a movement function (e.g., `move_forward_action(speed)`), the library checks that `speed` does not exceed the `max_pwm_value` set in the YAML. If it does, a `MaxPowerExceededException` is raised. This prevents unforeseen current spikes.
-2.  **`_is_forced` Tracking**: The class internally tracks if the motors are in a "Force Brake" state (magnetic braking/short circuit).
+# Directional actions
+robot.drivetrain.move_forward_action(50)  # speed 0-100
+robot.drivetrain.turn_left_action(50)
+robot.drivetrain.turn_right_action(50)
+robot.drivetrain.coast()  # stop motors
+robot.drivetrain.force_brake(100)  # emergency brake
+```
+
+## High-Level Primitives (Encoder-based)
+
+> [!NOTE]
+> Requires encoders to be configured in `baraconfig.yaml`.
+
+```python
+# Time-based drive (approximate)
+robot.drivetrain.drive(duration_seconds=2.0)  # uses base_speed from config
+robot.drivetrain.drive(duration_seconds=1.0, speed=70)
+
+# Distance-based drive (precise, uses encoders)
+robot.drivetrain.drive_distance(distance_mm=500)
+
+# Spin/turn in place
+robot.drivetrain.spin(degrees=90)  # right 90 degrees (time-based, approximate)
+robot.drivetrain.spin(degrees=-90)  # left 90 degrees
+
+# Gyro-assisted spin (precise!)
+robot.drivetrain.spin(
+    degrees=90,
+    use_gyro=True,
+    gyro_sensor_id="main_gyro",
+    sensor_getter=robot.sensor.get
+)
+```
+
+## Encoders
+
+If configured, you can read encoder data:
+
+```python
+# Get raw tick counts
+ticks = robot.drivetrain.get_encoder_ticks()
+# {'left': 1234, 'right': 1230}
+
+# Get distance in mm
+dists = robot.drivetrain.get_encoder_distance_mm()
+# {'left': 500.0, 'right': 495.0}
+
+# Reset encoders
+robot.drivetrain.reset_encoders()
+```
+
+## Configuration (baraconfig.yaml)
+
+```yaml
+drivetrain:
+  max_pwm_value: 100
+  
+  encoders:
+    exists: true
+    ticks_per_rev: 360      # Encoder ticks per wheel revolution
+    wheel_circumference_mm: 200  # Wheel circumference in mm
+    left:
+      pin_a: 32
+      pin_b: 33
+    right:
+      pin_a: 34
+      pin_b: 35
+```
 
 > [!CAUTION]
-> **About using `force_brake(max_pwm_value)`**
-> This function sets all four direction pins (IN1, IN2) to `HIGH`. This short-circuits the motors, generating an extremely strong magnetic braking force. It **must never** be kept active for more than a few seconds, otherwise it will overheat and potentially burn out the H-Bridge driver chips! Use `coast()` to free-wheel and stop safely.
-
-## `health_check()`: Hardware Truth vs Software
-
-One of the biggest issues in robotics is interference. If another Python script or a system daemon modifies the state of GPIO pin 12 (assigned to the motor), your script's internal `lastState` variable will still show `0`, but the hardware will be receiving `1` (the motor spins on its own!).
-
-The `health_check()` function prevents this. It physically reads the silicon state using `GPIO.input(pin)` for the pins configured as `OUT`, and compares them with the known logical state.
-
-```python
-from baracommlib.Motors import Motors
-
-motors = Motors(config)
-
-motors.move_forward_action(50)
-
-# Later in the code...
-if not motors.health_check():
-    print("ALARM: Something else is writing to the motor pins!")
-    # Intervention: re-assert control!
-    motors.coast()
-```
-
-## Movement Examples
-
-The APIs to move the robot are self-explanatory and designed for differential drive robots (Skid-Steer/Tank drive).
-
-```python
-# Move forward at 100% (or max allowed)
-motors.move_forward_action(100)
-
-# Turn on the spot (Tank Turn)
-motors.turn_left_action(50)
-
-# Manual and asymmetrical movements
-from baracommlib.Motors import Motor
-motors.assign_manual_power(Motor.A, 80)
-motors.assign_manual_power(Motor.B, 30)
-
-# Stop by cutting power (Free-wheel / Coast)
-motors.coast()
-```
+> If `exists: false`, `drive_distance()` and encoder methods will raise an error. Always check encoder configuration before using precision movement.
