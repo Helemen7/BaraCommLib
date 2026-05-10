@@ -1,91 +1,94 @@
-# Asynchronous Sensors (`sensors.py`)
+# Sensors System
 
-> [!NOTE]
-> For details on automatic crash recovery and fail-safe behavior when sensors fail continuously for 5+ seconds, see the dedicated [Fail-Safe System documentation](fail_safe.md).
+BaraCommLib abstracts all hardware sensors behind a common interface so that higher‑level code can work with *values* instead of raw I²C reads.
+The sensor layer is split into three parts:
+1. **AbstractSensor** – generic polling thread, error handling and fail‑safe hooks.
+2. Concrete subclasses for the two supported families: ToF (`VL53L0X/L1X/L4CD`) and IMU (MPU6050 / BNO055 / BNO085).
+3. **SensorsManager** – a high‑level orchestrator that instantiates all sensors defined in your YAML config, starts their polling threads and exposes convenient lookup helpers.
 
-Reading data from the I2C bus is an inherently "slow" operation compared to the clock cycles of a modern Raspberry Pi. Executing consecutive readings of three ToF sensors in the main thread could take 60-100ms, ruining the performance of a line-follower robot's PID controller or the timing of camera-based visual analysis.
+> All sensor classes live under :mod:`baracommlib.sensors`.
 
-The `SensorsManager` class radically solves this problem by using Threading.
+---
+## AbstractSensor (Base Class)
+```python
+from baracomllb import SensorsManager  # for type hinting only
+```
+| Method | Parameters | Return Value | Side Effects |
+|--------|------------|--------------|-------------|
+| ``__init__(config_node: dict, i2c_bus=None,
+    sensor_type: str = "unknown",
+    bus_id: str = "unknown", on_critical_failure = None)`` | *config_node*: parsed YAML entry for the particular sensor.<br>*i2c_bus:* shared :class:`busio.I2C` instance or ``None`` (mock mode).<br>*sensor_type*, *bus_id*: metadata used by fail‑safe logic. <br>*on_critical_failure*: callable that is triggered after 5 s of continuous errors.<br>| None – sets up internal lock, thread placeholders and state flags.| No hardware interaction yet; just prepares the polling infrastructure.
+| ``start()`` | – | Starts background read loop in a daemon thread. If already running it returns immediately. | Thread starts executing :py:meth:`_polling_loop` which calls `_read_hardware()` each *poll_rate* seconds.<br>Initialises hardware by calling :py:meth:`_initialize_hardware`. |
+| ``stop()`` | – | Signals thread to terminate and joins it with a 1 s timeout. | The polling loop exits, leaving the sensor instance in an idle state.
+| ``pause()/resume()`** | – | Pauses or resumes reads without stopping the background thread.| Useful for low‑power scenarios; all callbacks will still fire but `_read_hardware` is skipped while paused.<br>Read age continues to increase during pause.
+| ``set_poll_rate(rate_seconds: float)`` | *rate* | Adjusts time between consecutive sensor polls. Default 0.03 s (≈30 Hz). |
+| ``get_value() -> Any`` | – | Thread‑safe access to the most recent **valid** reading, or ``None`` if no valid value yet.<br>It checks :py:attr:`_latest_reading.is_valid`. |
+| ``get_reading_age() -> float`` | – | Time in seconds since last read (or ``inf`` before any poll). Useful for freshness filtering. |
 
-## How Background Polling Works
+### Internal polling loop (`_polling_loop`)
+The core of the class is a simple while‑loop that repeatedly:
+1. Calls `_read_hardware()` inside a try/except.
+2. Stores result in :class:`SensorReading(value, timestamp)` (or marks as invalid on error).
+3. Tracks consecutive errors – after 5 s it invokes ``on_critical_failure`` **in the background** and shuts itself down to allow re‑initialisation by *SensorsManager*.
+4. Implements exponential backoff: each successive failure multiplies sleep time by 1.5 up to a maximum of 5 seconds, preventing a tight error loop on broken hardware.
 
-1.  Every instantiated sensor creates its own `threading.Thread` marked as `daemon=True` (so it automatically dies when the program exits).
-2.  An infinite loop (`_polling_loop`) runs inside this thread, continuously reading the hardware on the I2C bus (e.g., `_sensor_instance.distance`).
-3.  The read value is stored in a shared variable protected by a `threading.Lock`. Along with the value, a _Timestamp_ is saved.
-4.  When you call `sensors.get_reading("front")` in your main code, the library **does not poll the sensor**; it simply returns the latest saved variable. This happens in **$O(1)$** and is completely instantaneous.
+### Concrete subclasses
+They only need to implement ``_initialize_hardware`` and ``_read_hardware``; the base class takes care of everything else.
 
-## XSHUT Pins and I2C Conflicts Management
+---
+## ToFSensor (VL53L0X/L1X/L4CD)
+| Method | Parameters | Return Value |
+|--------|------------|--------------|
+| ``__init__(config_node: dict, i2c_bus,
+    direction_enum_cls, sensor_type: str = "unknown",
+    bus_id: str = "unknown", on_critical_failure = None)`` | Same as :class:`AbstractSensor`; additionally parses *model*, *xshut_pin* and optional *new_address*. |
+| ``turn_on() / turn_off()`` | – | Manipulates the XSHUT GPIO pin.  `True` to power‑up, `False` for reset.
+| ``_initialize_hardware(self) -> None`` | – | Calls :py:func:`adafruit_vl53x.*` constructors based on *model* and sets a new I²C address if requested.
+| ``_read_hardware() -> Any`` | – | Returns distance in millimetres.  If the sensor is not ready or hardware fails, falls back to cached value (`self.get_value()`), otherwise returns `0.0`.
 
-By default, ToF sensors (e.g., VL53L1X) all boot up on the same I2C address: `0x29`. If you connect 3 of them, they will all talk at once and lock up.
-The `SensorsManager` natively implements a sequential startup routine:
-1. It pulls all ToF XSHUT pins to LOW (turning off the sensors).
-2. It turns on the first one (HIGH).
-3. Via I2C, it commands it to change its address (e.g., `0x30`).
-4. It waits for a technical delay (50ms).
-5. It turns on the second one, and so forth.
+The class automatically handles **address collision** by powering all sensors low at boot (via XSHUT) and then sequentially enabling them with a short delay between each so that they negotiate their unique I²C address without clashing on the bus.
 
-> [!IMPORTANT]
-> For this magic to work, you must specify the `xshut_pin` and the `new_address` (if necessary) in the `baraconfig.yaml`.
+---
+## IMUSensor (MPU6050 / BNO055 / BNO085)
+| Method | Parameters | Return Value |
+|--------|------------|--------------|
+| ``__init__(config_node: dict, i2c_bus,
+    direction_enum_cls, sensor_type: str = "unknown",
+    bus_id: str = "unknown", on_critical_failure = None)`` | Parses *model*, optional *axis_mapping* and *inverted_axes*. |
+| ``_initialize_hardware() -> None`` | – | Instantiates the appropriate Adafruit / mpu6050 library class, configures address.
+| ``_read_hardware() -> Any`` | – | Returns a dictionary with keys `yaw`, `pitch` and `roll`.  For MPU6050 it performs an on‑device complementary filter; for BNO series it reads the fused Euler angles directly.
 
-## Dynamic Enum for Directions
+The IMU sensor also exposes :py:meth:`calibrate()` to compute offset samples, but this is optional – by default raw values are returned.
 
-Instead of hardcoding words like `FRONT`, `LEFT`, etc. in the code, the library reads your YAML. If you write `direction: "diagonal_right"` in the YAML, the `SensorsManager` will dynamically create `manager.Direction.DIAGONAL_RIGHT` for you.
-
-This enables incredibly powerful grouped queries.
-
-## Usage Examples
-
+---
+## SensorsManager (High‑Level Orchestrator)
+This class ties everything together and provides a **single entry point** for the rest of the library.
 ```python
 from baracommlib.sensors import SensorsManager
-
-# The manager will read the config, build the Enum, initialize the I2C
-# buses via blinka, and start threads for all sensors.
-sensors = SensorsManager(config)
-
-# Gather grouped values
-# .Direction was created based on the strings found in the YAML
-front_dict = sensors.get_readings_by_direction(sensors.Direction.FRONT)
-# Expected Output: {"front_left": 120, "front_right": 122}
-
-# Check data freshness
-my_sensor = sensors.get_sensor("front_tof")
-age = my_sensor.get_reading_age()
-
-if age > 0.5:
-    print("Warning: The front sensor thread hasn't responded for half a second!")
+manager = SensorsManager(config, stop_robot_callback=robot.stop_drivetrain)  # example callback
 ```
+| Method | Parameters | Return Value |
+|--------|------------|--------------|
+| ``__init__(config: dict, stop_robot_callback=None) -> None`` | *config*: the full YAML configuration.<br>*stop_robot_callback:* callable that stops drivetrain when a critical sensor error occurs. | Instantiates I²C buses, builds `SensorDirection` enum from all configured directions and creates concrete sensors.
+| ``start_all()`` | – | Starts every sensor thread (calls :py:meth:`AbstractSensor.start`). |
+| ``stop_all()`` | – | Stops every sensor thread gracefully. |
+| ``get_reading(sensor_id: str) -> Any`` | ID of the desired sensor | Returns latest value or ``None`` if not found.<br>Uses :py:meth:`AbstractSensor.get_value` internally.
+| ``get_sensor(sensor_id: str) -> AbstractSensor`` | – | Direct access to the underlying class instance. |
+| ``get_readings_by_direction(direction: Union[Enum, str]) -> Dict[str, Any]`` | *direction* name or enum value | Returns a dictionary mapping sensor id → latest reading for all sensors that point in the specified direction.
+| ``_handle_sensor_failure(sensor_type: str, bus_id: str)`` | Called automatically by any concrete sensor when 5 s of consecutive errors are detected. |
 
-## IMU / Gyroscope Features
+### Fail‑Safe Integration
+When a sensor reports continuous failures, :py:meth:`SensorsManager._handle_sensor_failure`:
+1. Calls ``stop_robot_callback()`` – usually the robot's drivetrain is halted.
+2. Stops and removes all sensors of that type on the affected bus to avoid further error noise.
+3. Re‑initialises them from scratch (calling their constructors again) so they can rejoin with a clean state.
 
-The library ships with a highly customizable and unified interface for Inertial Measurement Units (IMUs), implemented in the `IMUSensor` class. 
+This behaviour is exercised in ``tests/test_general.py`` where an injected *FailingSensor* triggers the fail‑safe after ~5 s of errors and asserts that the drivetrain stops gracefully.
 
-### Supported Models
-
-- **BNO055** and **BNO085**: High-end sensors with built-in hardware Sensor Fusion. The library automatically fetches and normalizes the absolute Euler angles calculated natively by the chip's internal co-processor.
-- **MPU6050**: An entry-level 6-DOF IMU that strictly provides raw Accelerometer and Gyroscope data. Since it lacks a hardware compass or fusion processor, the `IMUSensor` class natively implements a **Software Complementary Filter** running under the hood in the polling thread. It fuses the Accelerometer gravity vectors (for absolute Pitch/Roll stability) with the Gyroscope integrations (for fast response and Yaw tracking), meaning your application code will never have to perform complex math.
-
-### Axis Mapping and Inversions
-
-Physical orientation inside your robot chassis often differs from the sensor board's standard axes. The library allows arbitrary mappings and inversions so that `{"yaw": ..., "pitch": ..., "roll": ...}` always match your robot's coordinate frame, strictly wrapped continuously between `0` and `360` degrees.
-
-This is managed entirely via the `baraconfig.yaml` configuration using two parameters:
-- `axis_mapping`: A list like `[0, 1, 2]` which remaps the raw `(Yaw, Pitch, Roll)` variables to different indices. 
-- `inverted_axes`: A list like `[False, True, False]` to negate angles.
-
-### Gyroscope Example Usage
-
+---
+## Using Sensors from Your Code
 ```python
-# Assuming you named your IMU 'main_gyro' in your YAML file
-gyro_reading = sensors.get_reading("main_gyro")
-
-if gyro_reading:
-    yaw = gyro_reading["yaw"]
-    pitch = gyro_reading["pitch"]
-    roll = gyro_reading["roll"]
-    
-    print(f"Current Robot Heading: {yaw:.1f}°")
-    
-    # Simple threshold logic without doing complex vector math
-    if pitch > 30.0 and pitch < 180.0:
-        print("Warning: Robot is climbing a steep incline!")
+# Example: read distance from front ToF sensor
+front_distance = robot.sensors_manager.get_reading("front")  # returns mm or None
 ```
+Because all sensors run on a background thread, ``get_value()`` is **instantaneous** – no blocking I²C transaction happens in your main loop.

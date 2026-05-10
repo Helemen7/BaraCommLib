@@ -1,190 +1,70 @@
-# PID Controller
+# PID Controllers
 
-BaraCommLib includes a robust PID (Proportional-Integral-Derivative) controller for precise movement.
-
-## Basic PID
-
-```python
-from baracommlib.pid_controller import PIDController
-
-pid = PIDController(kp=1.0, ki=0.05, kd=0.1, output_min=-100, output_max=100)
-pid.set_setpoint(100)
-
-# In a loop:
-output = pid.compute(current_value)
-# output is the corrective action
-```
-
-## Position PID (for distances)
-
-```python
-from baracommlib.pid_controller import PositionPID
-
-pos_pid = PositionPID(kp=1.5, ki=0.05, kd=0.5, max_speed=100)
-target_position = 500  # ticks or mm
-
-while not pos_pid.target_reached:
-    current = get_encoder_position()
-    speed = pos_pid.compute(current, target_position)
-    motor.set_speed(speed)
-```
-
-## Velocity PID (for constant speed)
-
-```python
-from baracommlib.pid_controller import VelocityPID
-
-vel_pid = VelocityPID(kp=1.0, ki=0.1, kd=0.05, max_pwm=100)
-target_speed = 200  # ticks per second
-
-# In loop:
-current_speed = get_encoder_speed()
-pwm = vel_pid.compute(current_speed, target_speed)
-motor.set_pwm(pwm)
-```
+The library bundles a small but fully‑featured **PID controller** implementation that is reused by both position (distance or angle) and velocity control primitives.
+All three classes share the same internal algorithm defined in :class:`~baracommlib.pid_controller.PIDController`.  The specialised wrappers simply set sensible defaults for gains, output limits and expose a convenient `compute()` method tuned to the specific application.
 
 ---
-
-# IO Devices (LEDs & Buzzers)
-
-Control status LEDs and buzzers from your config.
-
-## Configuration
-
-```yaml
-io:
-  leds:
-    - id: "status"
-      pin: 2
-      pwm: false  # true for dimmable LED
-    - id: "power"
-      pin: 3
-      pwm: true
-  
-  buzzers:
-    - id: "alarm"
-      pin: 4
-```
-
-## Usage
-
+## Class: `PIDController`
 ```python
-robot = BaraRobot()
-
-# Quick access
-robot.io.led("status", on=True)
-robot.io.beep("alarm", duration_ms=200)
-
-# Direct control
-status_led = robot.io.get_led("status")
-status_led.on()
-status_led.blink(times=3, duration_ms=150)
-
-alarm = robot.io.get_buzzer("alarm")
-alarm.beep(100)  # 100ms beep
-alarm.play_sequence([(440, 200), (880, 200), (440, 200)])  # RTTTL-like
+pid = PIDController(kp=2.0, ki=0.5, kd=1.0)
+speed = pid.compute(current_value=10)  # returns corrective output in range [-100..100]
 ```
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| ``kp`` | float | `1.0` | Proportional gain – how aggressively the controller reacts to current error.
+| ``ki`` | float | `0.0` | Integral gain – accumulates past errors; helps eliminate steady‑state offset.
+| ``kd`` | float | `0.0` | Derivative gain – predicts future trend, damping oscillations.
+| ``setpoint`` | float | `0.0` | Desired target value for the controlled variable (e.g., distance in mm or speed in ticks/s).
+| ``output_min/max`` | float | `-100/100` | Saturation limits applied to the raw PID output before it is returned.
+| ``integral_limit`` | Optional[float] | None | If set, clamps the running integral term to prevent wind‑up during prolonged error conditions.  A common heuristic is a fraction of the output range (e.g., `max_speed * 0.5`). |
+
+### Core Methods
+- **`reset()`** – clears internal state: previous error = 0, integral accumulator = 0, timestamp to current time.
+- **`set_setpoint(setpoint)`** – updates target value; useful when the goal changes mid‑run.
+- **`compute(current_value: float, dt=None) -> float`** – main control loop.
+  - If *dt* is ``None`` it measures elapsed seconds from last call (defaulting to ~1 s on first invocation).
+  - Error = `setpoint − current_value`.
+  - **P term:** `kp * error`. |
+  - **I term:** add `error * dt` to the integral accumulator, then clamp if ``integral_limit`` is set; multiply by ``ki``. |
+  - **D term:** `(error − previous_error)/dt * kd`, zeroed when *dt* == 0.
+  - Update internal `_previous_error` and timestamp for next iteration.
+  - Sum P+I+D, clamp to `[output_min, output_max]` and return the result. |
+
+The controller is deliberately lightweight; it does **not** use any external libraries or callbacks – all calculations happen inline so that you can drop a single class into unit tests without dependencies on hardware.
 
 ---
+## Class: `PositionPID`
+A thin wrapper around :class:`PIDController` tuned for *distance* (or angle) control.  It converts encoder ticks / millimetres into motor PWM commands.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| ``kp``/``ki``/``kd`` | float | `1.5`, `0.05`, `0.5` | PID gains used by the underlying controller; chosen to give a reasonably fast response without overshoot.
+| ``max_speed`` | int | `100` | The maximum PWM duty cycle allowed for motors, which becomes both the output upper bound and half of the integral limit (`integral_limit = max_speed * 0.5`). |
 
-# Telemetry & Debug
+### Methods
+- **`compute(current_position: float, target_position: float) -> int`** –
+    - Sets controller setpoint to ``target_position``.
+    - Calls underlying `PIDController.compute()` with the current encoder value and casts the result to an integer PWM command.
+    - Updates flag :py:meth:`target_reached`: true if the absolute error is below 5 units (tolerance). |
+- **`reset()`** – Resets both the internal controller state and `target_reached`.|
 
-Monitor your robot's health and performance.
-
+Typical usage inside a drivetrain spin or drive‑distance routine:
 ```python
-from baracommlib.telemetry import get_telemetry, DebugPrinter
-
-telemetry = get_telemetry()
-
-# In main loop:
-telemetry.log(
-    sensor_readings={"front": robot.sensor.get("front")},
-    motor_status=robot.drivetrain.get_status(),
-    vision_fps=robot.vision.get_fps() if robot.vision else None
-)
-
-# Debug print
-DebugPrinter.sensors("", robot.sensor.get("front"))
-DebugPrinter.motors("", robot.drivetrain.get_status())
-DebugPrinter.loop_timing("", loop_time, target_hz=20)
-
-# At end of program:
-telemetry.print_summary()
+pid = PositionPID()
+speed_cmd = pid.compute(current_ticks, target_ticks)
+motors.move_forward_action(speed=speed_cmd)
 ```
+The returned value is already clamped to the motor’s power limits.
 
 ---
+## Class: `VelocityPID`
+Analogous to :class:`PositionPID` but designed for *speed* regulation.  It receives a current speed estimate (ticks per second or mm/s) and outputs a PWM command that keeps the robot running at the desired velocity.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| ``kp``/``ki``/``kd`` | float | `1.0`, `0.1`, `0.05` | PID gains; tuned for smooth acceleration/deceleration.
+| ``max_pwm`` | int | `100` | Output saturation limits and half of the integral bound (`integral_limit = max_pwm * 0.3`). |
 
-# Obstacle Avoidance
+### Methods
+- **`compute(current_speed: float, target_speed: float) -> int`** – Similar flow to :class:`PositionPID`, but the controller’s setpoint is a speed value.
+- **`reset()`** – Clears internal state for a fresh start.
 
-Reactive obstacle avoidance using ToF sensors.
-
-```python
-from baracommlib.obstacle_avoidance import ObstacleAvoider
-
-avoider = ObstacleAvoider(
-    get_sensor_reading=lambda sid: robot.sensor.get(sid),
-    move_forward=lambda s: robot.drivetrain.move_forward_action(s),
-    turn_left=lambda s: robot.drivetrain.turn_left_action(s),
-    turn_right=lambda s: robot.drivetrain.turn_right_action(s),
-    coast=lambda: robot.drivetrain.coast(),
-    front_sensor_ids=["front", "front_left", "front_right"],
-    left_sensor_ids=["left"],
-    right_sensor_ids=["right"],
-    safe_distance_mm=150,
-    speed=50
-)
-
-# In main loop:
-while True:
-    avoider.update()  # Returns True if action taken
-    time.sleep(0.05)
-```
-
----
-
-# State Machine
-
-Define complex robot behaviors as states.
-
-```python
-from baracommlib.state_machine import StateMachine, RobotState, State
-
-class DriveForwardState(State):
-    def update(self, machine):
-        # Your logic
-        if machine.get_data("obstacle_detected"):
-            return RobotState.AVOIDING
-        return None
-
-sm = StateMachine()
-sm.add_state(RobotState.IDLE, IdleState())
-sm.add_state(RobotState.RUNNING, DriveForwardState())
-sm.set_initial(RobotState.IDLE)
-sm.start()
-
-while True:
-    sm.update()
-```
-
----
-
-# Line Follower
-
-Support for analog reflective sensors.
-
-```python
-from baracommlib.line_follower import MultiLineSensor
-
-# Sensors configured in config as line_follower type
-line_sensor = MultiLineSensor(robot.config)
-
-# Get position relative to line
-position = line_sensor.get_line_position(["lf_1", "lf_2", "lf_3", "lf_4"])
-# Returns: "left", "center", "right", or "none"
-
-# Get offset for PID line following
-offset = line_sensor.get_line_center_offset(
-    sensor_ids=["lf_1", "lf_2", "lf_3", "lf_4"],
-    positions=[-30, -10, 10, 30]  # mm from center
-)
-```
+The velocity PID is most useful in high‑level motion primitives such as maintaining steady forward motion during obstacle avoidance or when you want to decouple acceleration from motor commands.

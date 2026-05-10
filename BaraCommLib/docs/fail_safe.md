@@ -1,147 +1,109 @@
-# Fail-Safe & Sensor Recovery System
+# Fail‑Safe & Sensor Recovery System
 
-> [!NOTE]
-> This feature was introduced in version 1.0.0 to provide commercial-grade robustness for autonomous robots running unattended.
-
-## Overview
-
-BaraCommLib includes an intelligent fail-safe system that automatically detects persistent sensor failures, halts the drivetrain to prevent damage, and attempts to reinitialize the affected sensors without requiring a full robot restart.
+BaraCommLib guarantees that the robot stops moving if a critical sensor has been continuously failing for **≥ 5 seconds**.
+The mechanism is distributed: each :class:`~baracommlib.sensors.AbstractSensor` monitors its own health, and when it decides the situation cannot be recovered locally it triggers a global fail‑safe routine that safely halts the drivetrain and rebuilds all sensors of the same type on the affected I²C bus.
 
 ---
-
-## How It Works
-
-### 1. Continuous Error Monitoring
-
-Each sensor runs in a dedicated background thread (via `AbstractSensor._polling_loop`). Every time a hardware read fails, the system logs the error and increments a consecutive error counter.
-
+## 1. Detection – `AbstractSensor._polling_loop`
+The background thread runs this loop until :py:meth:`stop` clears ``self._running``:
 ```python
-# Simplified logic inside _polling_loop
-try:
-    val = self._read_hardware()
-    self._latest_reading = SensorReading(val, time.time(), is_valid=True)
-    if consecutive_errors > 0:
-        logging.info(f"Sensor {self.sensor_id} recovered after {consecutive_errors} errors.")
-        consecutive_errors = 0  # Reset on success
-except Exception as e:
-    consecutive_errors += 1
-    if first_error_time is None:
-        first_error_time = time.time()
+while self._running:
+    if not self._paused:
+        try:
+            val = self._read_hardware()
+            with lock:  # protect shared state
+                self._latest_reading = SensorReading(val, now(), True)
+            consecutive_errors = 0
+        except Exception as e:
+            consecutive_errors += 1
+            if first_error_time is None:
+                first_error_time = now()
+            logging.error(f"Error reading sensor {self.sensor_id}: {e}")
+            with lock: self._latest_reading = SensorReading(None, now(), False)
+            # Trigger fail‑safe after 5 s of continuous failures
+            if now() - first_error_time >= 5.0:
+                logging.critical("Sensor %s failed >5 sec – triggering recover.")
+                threading.Thread(target=self.on_critical_failure,
+                                 args=(self.sensor_type, self.bus_id)).start()
+                # Stop this thread; SensorsManager will re‑create it later
+                first_error_time = None
+                consecutive_errors = 0
+    time.sleep(self._poll_rate)
 ```
+* **`consecutive_errors`** – count of successive failures.
+* **`first_error_time`** – timestamp when the current failure streak began. If the streak lasts five seconds, fail‑safe is invoked.
+* The thread sleeps for ``self._poll_rate`` (default 30 ms) between attempts to keep CPU usage low.
 
-### 2. Exponential Backoff
-
-To prevent flooding the I2C bus with failing requests, the system implements **exponential backoff**:
-
-- First failure: immediate retry (30ms poll rate)
-- Second failure: 45ms wait
-- Third failure: 67ms wait
-- ...and so on, maxing out at **5 seconds** between retries
-
-> [!TIP]
-> This backoff prevents the CPU from spinning uselessly while allowing the sensor a chance to recover (e.g., if it was temporarily disconnected or experiencing I2C noise).
-
-### 3. 5-Second Failure Threshold
-
-If the sensor continuously fails for **5 or more seconds**, the fail-safe triggers:
-
+---
+## 2. Escalation – Callback to `SensorsManager`
+The sensor launches a background thread that calls the callback supplied during :class:`~baracommlib.sensors.SensorsManager` construction:
 ```python
-if time.time() - first_error_time >= 5.0:
-    logging.critical(f"Sensor {self.sensor_id} failed for 5+ seconds! Triggering fail-safe reinit.")
-    if self.on_critical_failure:
-        threading.Thread(target=self.on_critical_failure, args=(self.sensor_type, self.bus_id)).start()
+threading.Thread(target=self.on_critical_failure,
+                 args=(self.sensor_type, self.bus_id)).start()
 ```
+### `SensorsManager._handle_sensor_failure(sensor_type: str, bus_id: str)`
+| Parameter | Role |
+|-----------|------|
+| ``sensor_type`` | e.g., "tof" or "imu" – the kind of sensor that failed. |
+| ``bus_id``     | Identifier of the I²C bus (matches config). |
 
-> [!WARNING]
-> The 5-second threshold is a hardcoded constant. If you need different behavior, you can modify `sensors.py` in the `_polling_loop` method.
+The handler performs three steps:
+1. **Stop drivetrain** – calls whatever callback was passed when initializing :class:`SensorsManager` (normally `self.drivetrain.stop`).
+2. **Remove failing sensors** – iterates over ``self.sensors``; for each sensor whose type and bus match, it invokes its own :meth:`stop()` method and deletes the entry from the dictionary.
+3. **Re‑create sensors of that type on that bus** – re‑instantiates all configurations found in `config['sensors'][sensor_type]` that belong to ``bus_id`` and starts them sequentially (important for ToF devices so they can negotiate unique I²C addresses).
 
----
-
-## Fail-Safe Sequence
-
-When the threshold is reached, the following actions occur **automatically**:
-
-1. **Stop Drivetrain**: The motors are immediately halted via `drivetrain.coast()` to prevent the robot from driving blindly into obstacles.
-
-2. **Sensor Reinitialization**: The `SensorsManager` iterates through all sensors of the failed type (e.g., all ToF sensors) on the affected I2C bus:
-   - Stops the failing sensor threads
-   - Removes them from the active sensor dictionary
-   - Recreates new sensor instances with fresh hardware initialization
-   - Restarts them sequentially (important for ToF to avoid address collisions)
-
-> [!IMPORTANT]
-> Only sensors on the same I2C bus and of the same type as the failing sensor are reinitialized. This prevents unnecessary disruption to working sensors.
+All steps run inside the callback thread, keeping the original sensor’s polling loop from blocking.
 
 ---
-
-## Configuration
-
-The fail-safe system requires **no explicit configuration**—it is always enabled by default. However, ensure your `baraconfig.yaml` has proper I2C bus definitions:
-
-```yaml
-sensors:
-  buses:
-    - id: "i2c_1"
-      type: "i2c"
-      scl_pin: 22
-      sda_pin: 21
-      frequency: 400000
-```
-
-> [!CAUTION]
-> If you have only one I2C bus and a sensor fails, ALL sensors of that type on that bus will be reinitialized. This is expected behavior but may cause temporary data loss from other sensors.
-
----
-
-## Integration Points
-
-### Custom Sensors
-
-If you create custom sensors extending `AbstractSensor`, the fail-safe is **automatically inherited** as long as:
-
-1. Your sensor calls `super().__init__(..., sensor_type="your_type", bus_id="your_bus")` with appropriate type and bus IDs
-2. The `_read_hardware()` method raises an exception on failure (do not return invalid data silently)
-
-### Callback Injection
-
-The `SensorsManager` receives a `stop_robot_callback` during initialization, which is triggered when the fail-safe activates:
-
+## 3. Recovery – Re‑initialising Sensors
+Re‑instantiation logic is essentially a copy of normal boot:
 ```python
-# In BaraRobot.__init__
-self.drivetrain = Motors(self.config)
-self.sensors_manager = SensorsManager(self.config, stop_robot_callback=self.drivetrain.stop)
+if sensor_type == "tof":
+    for cfg in sensors_cfg.get("tof", []):
+        if cfg["bus"] == bus_id:
+            s = ToFSensor(cfg, self.buses[bus_id], …)
+            self.sensors[s.sensor_id] = s
+            s.start()
 ```
-
-> [!NOTE]
-> The callback runs in a separate thread to prevent deadlock when the sensor's own thread is dying.
+The library sleeps briefly (≈ 50 ms) between each sensor’s start to allow the I²C address negotiation to complete.
+For IMUs it simply recreates and starts them without special sequencing.
 
 ---
+## Practical Usage & Customisation
+| Task | What you need to set |
+|------|---------------------|
+| **Provide a stop callback** – `SensorsManager(config, stop_robot_callback=self.drivetrain.stop)` is already done in :class:`BaraRobot.__init__`. |
+| **Change fail‑safe threshold** – edit the literal ``5.0`` inside *sensors.py*’s `_polling_loop`.
+| **Add a custom sensor class** – inherit from `AbstractSensor`, call super with appropriate ``sensor_type`` and ``bus_id``, ensure `_read_hardware()` raises an exception on error; fail‑safe will pick it up automatically. |
 
-## Testing
+---
+## Key Functions & Methods (Quick Reference)
+- :class:`~baracommlib.sensors.AbstractSensor._polling_loop`
+- :meth:`SensorsManager._handle_sensor_failure(sensor_type, bus_id)`
+- :class:`Motors.coast()` / ``stop()`` – the safe stop routine invoked by fail‑safe.
 
-You can verify the fail-safe works on a PC without hardware using the included test:
-
+---
+## Testing & Verification
+Run the bundled test on a PC (mocked hardware):
 ```bash
-cd BaraCommLib
+cd /home/helemen7/Coding/Robotica/BaraCommLib
 PYTHONPATH=./src python tests/test_general.py
 ```
-
-The test injects a `FailingSensor` that always raises exceptions, waits for 5+ seconds of continuous errors, and verifies the drivetrain stops and the robot remains responsive.
+It injects a sensor that always raises an exception, waits for > 5 seconds and confirms the drivetrain has been stopped.
 
 ---
+## Troubleshooting Common Issues
+| Symptom | Likely Cause |
+|---------|--------------|
+| Drivetrain does not stop after fail‑safe triggers | `stop_robot_callback` was *not* passed to :class:`SensorsManager`.  Verify you call `self.sensors_manager = SensorsManager(self.config, stop_robot_callback=self.drivetrain.stop)` in your robot class.
+| Sensor keeps failing even after recovery | Loose I²C wiring or incorrect bus frequency. Reduce the ``frequency`` field (e.g., to 100 kHz) and retry.
+| No “failed >5 s” log message | Logging is configured at a level lower than INFO/CRITICAL, or `logging.basicConfig(level=logging.INFO)` has not been called before sensors start.
 
-## Troubleshooting
+---
+## Extending the Fail‑Safe for New Sensor Types
+1. Create your sensor subclass inheriting :class:`AbstractSensor`.
+2. In its ``__init__`` call `super().__init__(..., sensor_type="mytype", bus_id=…)`.
+3. Make sure `_read_hardware()` raises an exception when hardware is unreachable; returning ``None`` or a stale value will not trigger fail‑safe.
+4. The default :class:`SensorsManager._handle_sensor_failure` already knows how to rebuild all sensors of type "mytype" on the same bus, so no additional code is required.
 
-### "Sensor thread stopped after 5.5s - fail-safe triggered!" but robot didn't stop
-
-- Ensure the sensor was added to `SensorsManager.sensors` with correct `sensor_type` and `bus_id`
-- Verify the `stop_robot_callback` was passed during `SensorsManager` initialization
-
-### Sensor keeps failing even after reinit
-
-- Check hardware connections (loose I2C wiring is the most common cause)
-- Try lowering the I2C frequency in your config: `frequency: 100000` instead of 400000
-- Verify you're using the correct sensor model (VL53L1X vs VL53L0X vs VL53L4CD)
-
-> [!CAUTION]
-> If a sensor consistently fails after reinit more than 3 times in a row, there is likely a hardware issue. The system will keep trying, but you should inspect the wiring and sensor.
+That covers every public function involved in BaraCommLib’s built‑in fail‑safe mechanism.

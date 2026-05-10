@@ -1,92 +1,48 @@
 # Configuration Management
 
-The `config_manager.py` file contains the `ConfigManager` class, responsible for ensuring that the user-provided YAML settings are valid, safe, and free from logical or hardware paradoxes.
+BaraCommLib ships a **default** YAML file (`default_config.yaml`) that contains sane, hardware‑agnostic defaults for every subsystem.
+When the robot starts it looks for ``baraconfig.yaml`` in its working directory.  If it is missing the library will copy the default into place and raise an exception so you can edit it before re‑running.
 
-## Internal Workflow
+The whole validation pipeline lives inside :class:`~baracommlib.config_manager.ConfigManager`.  It guarantees that:
+* every required section exists,
+* all values are of the expected type, and
+* hardware resources (GPIO pins, I²C addresses) do not collide across subsystems.
 
-When you call `load_and_validate()`, the class performs these steps:
+> **Why validate?**
+>
+> A mis‑configured pin or duplicate address can leave your robot in an unrecoverable state.  By catching these errors early you avoid expensive debugging on the target board.
 
-1.  **File Existence**: Checks if `baraconfig.yaml` exists. If not, it copies a base version from `default_config.yaml` and raises an exception asking the user to fill it out.
-2.  **Type Validation**: Through the abstract `_validate_field` function, it ensures that an integer is actually an integer and that a string belongs to the expected values (e.g., `allowed_values=['up', 'down']`).
-3.  **Hardware Collision Detection**: *This is the most important feature.*
-    *   **GPIO Pin Collisions**: Maintains an internal `used_pins` dictionary. If you declare pin 15 for a ToF sensor and then accidentally use 15 for the left motor's `in1`, the validator will print `Pin collision! Pin 15 is used by...` and halt execution.
-    *   **I2C Address Collisions**: If you assign `0x29` to two different sensors on the same bus (`i2c_1`), the validator will immediately block you.
-
-> [!TIP]
-> Access to the validated configuration in the rest of the library is done in a "fail-fast" style (e.g., `config["mandatory_key"]`) rather than using `.get()`. This way, if validation somehow lets an empty field pass, the program will crash with a easily traceable `KeyError`.
-
-## How to add a new YAML field
-
-Writing validation code for nested dictionaries is tedious. That's why `_validate_field()` was implemented.
-
-If you add the following field to `default_config.yaml`:
-```yaml
-robot:
-  color: "blue" # Only red, blue, green allowed
-```
-
-You just need to go into `config_manager.py` and add:
-```python
-robot = config.get('robot', {})
-if not self._validate_field(robot, 'color', str, allowed_values=["red", "blue", "green"], context="robot"): 
-    return False
-```
-
-## Usage Example
+## Class :class:`ConfigManager`
 
 ```python
 from baracommlib.config_manager import ConfigManager
-
-manager = ConfigManager("my_robot.yaml")
-try:
-    config = manager.load_and_validate()
-    print("Perfect Configuration! Base speed is:", config["robot"]["base_speed"])
-except RuntimeError as e:
-    print(f"Critical configuration error: {e}")
-    # Shut down the system
+cm = ConfigManager("baraconfig.yaml")
+cfg_dict = cm.load_and_validate()
 ```
 
----
+| Method | Parameters | Return Value | Notes |
+|--------|------------|--------------|-------|
+| ``__init__(config_filepath: str = "baraconfig.yaml")`` | Path to the YAML file.  Default is a relative path that will resolve in the current working directory.| None – just stores arguments for later use. | Raises no error on construction; validation happens when you call :py:meth:`load_and_validate`. |
+| ``load_and_validate() -> dict`` | – | The fully parsed and validated configuration dictionary.
+|  –| If file is missing it copies the bundled default, raises a descriptive `RuntimeError` with instructions to edit the new file. |
 
-## Color Tracking Configuration
+### Private helpers (implementation details)
+The library keeps all heavy lifting in private helper methods that are **well documented** inline in the source for reference.
 
-> [!NOTE]
-> The Color Tracking feature is optional. If disabled, the configuration can be omitted entirely.
+#### `_inject_default_config()`
+* Copies ``default_config.yaml`` from the package directory into *config_filepath*.  If it cannot be found a hard error is raised because the rest of the system depends on at least some configuration to start.
 
-The `vision.color_tracking` section allows you to define custom HSV or BGR/RGB bounds for color detection. This is useful for overriding the default presets or adding new colors specific to your task.
+#### `_validate_field(data: dict, field: str, expected_type=None,
+    allowed_values=None, required=True, context="") -> bool`
+* Checks that *field* exists in *data*, optionally verifies its type and membership.  It prints a human‑readable error message to :py:mod:`logging` and returns ``False`` so the caller can abort.
 
-### Structure
+#### `_isConfigHealthy(config: dict) -> bool`
+This is the heart of validation – it walks through every top‑level section in order:
+1. **Root** must be a dictionary.
+2. **Robot** – checks mandatory keys like `base_speed`, ensures they are integers and within hardware limits.
+3. **Drivetrain** – verifies PWM pins, motor directions, encoder pins (if enabled) and that all used GPIO pins are unique across motors/encoders/sensors.
+4. **Sensors** – walks through I²C buses, ToF sensors (`VL53` series), IMUs (`BNO`, `MPU`).  It checks for missing mandatory keys, pin collisions, duplicate I²C addresses and that each sensor’s bus exists in the defined list of buses.
+5. **IO** – validates button/pin assignments, pull‑up/down configuration, LED pins.
+6. **Vision** – ensures camera resolution lists contain exactly two integers if vision is enabled.
 
-```yaml
-vision:
-  color_tracking:
-    enabled: true  # Set to false to disable (or omit this section entirely)
-    colors:
-      custom_red:
-        hsv:
-          lower: [0, 120, 70]
-          upper: [10, 255, 255]
-        bgr:
-          lower: [0, 0, 150]
-          upper: [100, 100, 255]
-```
-
-### Validation Rules
-
-The `ConfigManager` enforces strict validation on color tracking settings:
-
-1. **Valid Color Spaces**: Only `hsv`, `bgr`, or `rgb` are allowed as color space keys.
-2. **Bounds Required**: Each color space must define both `lower` and `upper` bounds.
-3. **Tuple Size**: Both bounds must be arrays of exactly **3 integers** (representing the 3 channels).
-
-> [!WARNING]
-> If you provide invalid bounds (e.g., wrong number of channels), the robot will refuse to start and print a validation error.
-
-### Default Presets
-
-If you don't define any custom colors, the `ColorTracker` automatically uses these built-in presets (available in both HSV and BGR):
-
-- `red`, `green`, `blue`, `yellow`, `orange`, `purple`, `cyan`, `magenta`, `white`, `black`
-
-> [!TIP]
-> The built-in presets are optimized for general-purpose use. Only override them if your lighting conditions are unusual or you need very specific color thresholds.
+Each subsection logs a clear message such as *"Pin collision! Pin 15 used by 'motor_left_in1' and 'tof_front_xshut'"
