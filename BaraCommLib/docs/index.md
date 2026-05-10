@@ -1,25 +1,67 @@
-# BaraCommLib Documentation
+# BaraCommLib - Official Documentation
 
-BaraCommLib is a lightweight, hardware‑agnostic robot control library written in Python.
-It exposes a clean API for:
-* Configuration parsing and validation (`config_manager`)
-* Sensor abstraction (I²C devices, IMUs, ToF sensors – see `sensors`) 
-* State machine orchestration (`state_machine`)
-* Drive‑train primitives with encoder support (`Motors`, `drivetrain`) 
-* PID controllers for motion control (`pid_controller`) 
-* Telemetry logging and debugging utilities
-* Optional computer‑vision helpers (color tracking, model inference – see `vision`).
+Welcome to the hyper-detailed documentation of **BaraCommLib**. This library is designed to provide a robust, safe, asynchronous, and fail-safe interface for controlling Raspberry Pi-based robots (like the Capybara project).
 
-The library is split into a small set of core modules; each has its own Markdown page that documents public classes/methods in detail.
+> [!NOTE]
+> The architecture is divided into three main pillars: **Configuration**, **Movement (Drivetrain)**, and **Sensors (Perception)**. Everything has been designed to be fully testable even on non-ARM PCs via a sophisticated automatic Mocking system.
 
-## Table of Contents
-- **[BaraRobot](bararobot.md)** — High‑level robot wrapper: config loading, sensor & motor initialization, high‑level actions.
-- **[Configuration Management](configuration.md)** — `ConfigManager` and the validation logic for the YAML configuration file.
-- **[Sensors System](sensors.md)** — Abstract base class, ToF / IMU implementations, multi‑bus handling and fail‑safe behaviour.
-- **[Motors & Drive Train](motors.md)** — Motor driver abstraction, encoder handling and motion primitives (`drive`, `spin`).
-- **[PID Controllers](pid_io.md)** — Generic PID controller plus position/velocity specialisations with clamping logic.
-- **[Vision Module](vision.md)** — Optional camera capture thread, TFLite inference wrapper, colour‑tracking utilities.
-- **[State Machine Framework](state_machine.md)** — Hierarchical state machine implementation used by `BaraRobot` for complex behaviours.
-- **[Fail‑Safe Handling](fail_safe.md)** — How sensor errors are detected and how the robot is safely stopped.
+## Documentation Index
+1. [BaraRobot Class (High-Level API)](bararobot.md) - **Start Here!**
+2. [Computer Vision & AI (`vision.md`)](vision.md) - Add AI to your robot in 5 lines of code.
+3. [Fail-Safe & Sensor Recovery (`fail_safe.md`)](fail_safe.md) - Automatic crash detection and robot safety.
+4. [Motor Control & PID (`motors.md`)](motors.md) - Encoders, drive(), spin(), PID controller.
+5. [Advanced Features (`pid_io.md`)](pid_io.md) - **NEW!** LED/Buzzer, Telemetry, Obstacle Avoidance, State Machine, Line Follower.
+6. [Configuration Management (`configuration.md`)](configuration.md)
+7. [Asynchronous Sensors and I2C (`sensors.md`)](sensors.md)
+8. [PC Development and Mocking (`development.md`)](development.md)
 
-> All source files live in ``/home/.../BarCommLib/src/baracommlib``.  The docs assume you have a working Python environment (Python 3.9+) with all dependencies installed via Poetry (`poetry install`).
+## Library Philosophy
+- **Fail Fast, Fail Safe**: If you misconfigure a pin (e.g., two components share the same pin), the library immediately raises an exception at boot, long before the robot can move or cause damage.
+- **Non-blocking by design**: Sensor readings, especially on I2C buses (which are slow), happen in the background. Your main logic or AI loop will **never** have to wait 30ms to read a distance sensor.
+- **Hardware-Truth Validation**: `health_check` functions do not blindly trust software variables. They directly poll the hardware to detect desynchronizations or external interferences.
+
+---
+
+### Quick Example (Main Loop)
+Here is an example of how all components come together in a classic `main.py` file:
+
+```python
+import time
+from baracommlib.config_manager import ConfigManager
+from baracommlib.Motors import Motors
+from baracommlib.sensors import SensorsManager
+
+# 1. Load and validate the configuration
+cfg_manager = ConfigManager()
+config = cfg_manager.load_and_validate()
+
+# 2. Initialize subsystems
+motors = Motors(config)
+sensors = SensorsManager(config)
+
+# 3. Main Loop
+try:
+    while True:
+        # Hardware safety check
+        if not motors.health_check():
+            print("CRITICAL: Motors desynchronized. Emergency stop!")
+            motors.coast()
+            break
+            
+        # Instant O(1) reading from sensor threads
+        front_sensors = sensors.get_readings_by_direction(sensors.Direction.FRONT)
+        
+        # Basic obstacle avoidance logic
+        if any(dist and dist < 150 for dist in front_sensors.values()):
+            motors.turn_left_action(50)
+        else:
+            motors.move_forward_action(config["robot"]["base_speed"])
+            
+        time.sleep(0.05)
+
+except KeyboardInterrupt:
+    print("Shutting down...")
+finally:
+    motors.coast()
+    sensors.stop_all()
+```
