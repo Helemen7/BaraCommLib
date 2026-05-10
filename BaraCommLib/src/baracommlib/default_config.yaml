@@ -22,7 +22,9 @@ drivetrain:
 
   encoders:   # Currently not implemented as I do not have any way to try them
     # Optional setup for wheel encoders (odometry)
-    exists: false   # Setting this to false safely ignores encoder initialization
+    exists: true   # Enable for tests
+    ticks_per_rev: 360       # Example tick count per revolution
+    wheel_circumference_mm: 200  # Example circumference in mm
     left:
       pin_a: 32
       pin_b: 33
