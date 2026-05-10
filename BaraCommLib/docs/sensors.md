@@ -366,4 +366,3 @@ while True:
 
 - [Fail-Safe System](./fail_safe.md) - Automatic crash recovery
 - [BaraRobot Class](./bararobot.md) - High-level sensor access
-- [IMU Configuration](./configuration.md#imu-setup) - Axis mapping details
