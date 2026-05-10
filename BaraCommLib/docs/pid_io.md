@@ -1,6 +1,39 @@
-# PID Controller
+# PID Controller & IO Devices
 
-BaraCommLib includes a robust PID (Proportional-Integral-Derivative) controller for precise movement.
+This module provides advanced motion control and output device management:
+- **PID Controllers**: Position-based and velocity-based control loops
+- **IO Devices**: LED control, buzzer/beep functionality
+- **Telemetry**: Debug logging and performance monitoring
+- **Obstacle Avoidance**: Reactive navigation using sensor data
+- **State Machine**: Hierarchical behavior organization
+- **Line Follower**: Analog reflective sensor support
+
+## Quick Reference
+
+### PID Controllers
+```python
+from baracommlib.pid_controller import PositionPID, VelocityPID
+
+# Reach specific distance/angle
+pos_pid = PositionPID(kp=1.5, ki=0.05, kd=0.5)
+speed = pos_pid.compute(current_position, target_position)
+
+# Maintain constant speed
+vel_pid = VelocityPID(kp=1.0, ki=0.1, kd=0.05)
+pwm = vel_pid.compute(current_speed, target_speed)
+```
+
+### IO Devices
+```python
+robot.io.led("status", on=True)
+robot.io.beep("alarm", duration_ms=200)
+```
+
+## Full Documentation
+
+For comprehensive examples and advanced patterns:
+- [Vision Guide](./vision.md) - Complete computer vision system
+- [BaraRobot](./bararobot.md) - All high-level features
 
 ## Basic PID
 

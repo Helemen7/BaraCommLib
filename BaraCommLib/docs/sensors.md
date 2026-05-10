@@ -1,91 +1,369 @@
-# Asynchronous Sensors (`sensors.py`)
+# Sensors & Perception System
+
+The `SensorsManager` class provides asynchronous, thread-based sensor polling for instant $O(1)$ data access. This architecture prevents blocking your main robot loop while waiting for slow I2C sensors to respond.
+
+---
+
+## Architecture Overview
+
+### How Background Polling Works
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Main Loop     │───▶│  Sensor Thread   │───▶│    I2C Bus      │
+│   (Your Code)   │◀───│  (Background)    │◀───│  (Hardware)     │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+       ▲                        │
+       │                        ▼
+       │              ┌─────────────────┐
+       └────────────▶│ Latest Reading  │◀───────────┐
+                      │ (Thread-Safe)   │             │
+                      └─────────────────┘             │
+                                                      │
+                    ┌─────────────────────────────────┘
+                    ▼
+              ┌─────────────────┐
+              │  Instant O(1)   │◀── Your code reads here
+              │    Access       │
+              └─────────────────┘
+```
+
+**Key Benefits:**
+- **Non-blocking**: Main loop never waits for I2C (typically 30-100ms per sensor)
+- **Thread-safe**: All shared data protected by `threading.Lock`
+- **Freshness tracking**: Each reading includes timestamp for age verification
+- **Automatic recovery**: Failed sensors trigger fail-safe reinitialization
+
+---
+
+## Quick Start
+
+```python
+from baracommlib.BaraRobot import BaraRobot
+
+robot = BaraRobot("baraconfig.yaml")
+
+# Instant O(1) sensor access (no blocking!)
+distance = robot.sensor.get("front_tof")  # e.g., 152.0 cm
+gyro = robot.sensor.get("main_gyro")       # {'yaw': 45.1, 'pitch': 0.2, 'roll': 1.5}
+
+# Grouped sensor access by direction
+front_sensors = robot.sensor.get_by_direction("front")
+print(front_sensors)  # {"front_left": 120, "front_right": 122}
+
+# Automatic averaging of grouped sensors
+avg_distance = robot.sensor.get_average_by_direction("front")
+if avg_distance and avg_distance < 100:
+    print("Wall detected!")
+```
+
+---
+
+## Sensor Reading Methods
+
+### `get(sensor_id)` - Single Sensor Access
+
+Returns the latest cached reading for a specific sensor by its unique ID.
+
+```python
+# ToF distance sensor
+front_dist = robot.sensor.get("front_tof")  # Returns: float (cm) or None
+
+# IMU orientation
+gyro_data = robot.sensor.get("main_gyro")   # Returns: dict with yaw/pitch/roll
+
+# Check if reading is valid
+if front_dist is not None and front_dist > 0:
+    print(f"Distance: {front_dist:.1f} cm")
+```
 
 > [!NOTE]
-> For details on automatic crash recovery and fail-safe behavior when sensors fail continuously for 5+ seconds, see the dedicated [Fail-Safe System documentation](fail_safe.md).
+> If a sensor has failed or returned invalid data, `get()` returns `None`. Always check for `None` before using the value.
 
-Reading data from the I2C bus is an inherently "slow" operation compared to the clock cycles of a modern Raspberry Pi. Executing consecutive readings of three ToF sensors in the main thread could take 60-100ms, ruining the performance of a line-follower robot's PID controller or the timing of camera-based visual analysis.
+### `get_by_direction(direction)` - Grouped Access
 
-The `SensorsManager` class radically solves this problem by using Threading.
+Fetches all sensors grouped under a logical direction (defined in YAML). Returns a dictionary mapping sensor IDs to values.
 
-## How Background Polling Works
+```python
+# Get all front-facing sensors
+front_dict = robot.sensor.get_by_direction("front")
+print(front_dict)  
+# Output: {"front_left": 120, "front_right": 125}
 
-1.  Every instantiated sensor creates its own `threading.Thread` marked as `daemon=True` (so it automatically dies when the program exits).
-2.  An infinite loop (`_polling_loop`) runs inside this thread, continuously reading the hardware on the I2C bus (e.g., `_sensor_instance.distance`).
-3.  The read value is stored in a shared variable protected by a `threading.Lock`. Along with the value, a _Timestamp_ is saved.
-4.  When you call `sensors.get_reading("front")` in your main code, the library **does not poll the sensor**; it simply returns the latest saved variable. This happens in **$O(1)$** and is completely instantaneous.
+# Works with any direction string from config
+diagonal = robot.sensor.get_by_direction("diagonal_right")
+back = robot.sensor.get_by_direction("rear")
+```
 
-## XSHUT Pins and I2C Conflicts Management
+### `get_average_by_direction(direction)` - Robust Averaging
 
-By default, ToF sensors (e.g., VL53L1X) all boot up on the same I2C address: `0x29`. If you connect 3 of them, they will all talk at once and lock up.
-The `SensorsManager` natively implements a sequential startup routine:
-1. It pulls all ToF XSHUT pins to LOW (turning off the sensors).
-2. It turns on the first one (HIGH).
-3. Via I2C, it commands it to change its address (e.g., `0x30`).
-4. It waits for a technical delay (50ms).
-5. It turns on the second one, and so forth.
+Automatically averages all valid numerical readings for sensors in a direction, filtering out broken/disconnected sensors.
 
-> [!IMPORTANT]
-> For this magic to work, you must specify the `xshut_pin` and the `new_address` (if necessary) in the `baraconfig.yaml`.
+```python
+# Get average distance from all front sensors (ignores failures)
+avg_dist = robot.sensor.get_average_by_direction("front")
 
-## Dynamic Enum for Directions
+if avg_dist is not None:
+    print(f"Average front distance: {avg_dist:.1f} cm")
+else:
+    print("No valid readings available!")
+```
 
-Instead of hardcoding words like `FRONT`, `LEFT`, etc. in the code, the library reads your YAML. If you write `direction: "diagonal_right"` in the YAML, the `SensorsManager` will dynamically create `manager.Direction.DIAGONAL_RIGHT` for you.
+### `get_sensor(sensor_id)` - Get Sensor Object
 
-This enables incredibly powerful grouped queries.
+Returns the actual sensor object for advanced operations (pause/resume, custom methods).
 
-## Usage Examples
+```python
+sensor_obj = robot.sensor.get_sensor("front_tof")
+
+# Check reading age (how many seconds since last read)
+age = sensor_obj.get_reading_age()  # Returns: float in seconds or inf
+
+if age > 0.5:
+    print(f"Warning: Sensor hasn't updated for {age:.1f}s!")
+    
+# Pause/resume individual sensors (advanced)
+sensor_obj.pause()   # Stop polling to save CPU/I2C bandwidth
+sensor_obj.resume()  # Resume polling
+```
+
+---
+
+## IMU / Gyroscope Features
+
+BaraCommLib supports multiple IMU models with automatic sensor fusion:
+
+### Supported Models
+
+| Model | Type | Features |
+|-------|------|----------|
+| **MPU6050** | 6-DOF | Accelerometer + Gyro (no compass) |
+| **BNO055** | 9-DOF | Accel + Gyro + Magnetometer (hardware fusion) |
+| **BNO085** | 9-DOF | Advanced fusion with motion tracking |
+
+### MPU6050 Software Sensor Fusion
+
+For MPU6050 (which lacks a built-in compass), BaraCommLib implements a **complementary filter**:
+
+```python
+# Under the hood in IMUSensor._read_hardware():
+# Pitch/Roll: 98% gyro + 2% accelerometer (stable + responsive)
+# Yaw: Pure gyro integration (fast but drifts over time)
+
+mpu_pitch = 0.98 * (mpu_pitch + gyro_x * dt) + 0.02 * accel_pitch
+mpu_roll = 0.98 * (mpu_roll + gyro_y * dt) + 0.02 * accel_roll
+mpu_yaw += gyro_z * dt  # No absolute reference - drifts
+```
+
+### Axis Mapping & Inversion
+
+Physical IMU orientation often differs from robot coordinate frames. Configure in YAML:
+
+```yaml
+imu:
+  - id: "main_gyro"
+    model: "MPU6050"
+    bus: "i2c_1"
+    
+    # Map raw sensor axes [X, Y, Z] to robot [Yaw, Pitch, Roll]
+    # 0=X axis, 1=Y axis, 2=Z axis
+    axis_mapping: [0, 1, 2]  # Default: yaw=x, pitch=y, roll=z
+    
+    # Invert axes if needed (e.g., sensor mounted upside down)
+    inverted_axes: [false, false, true]  # Negates Roll
+```
+
+### IMU Calibration
+
+Calibrate your IMU to remove offset errors:
 
 ```python
 from baracommlib.sensors import SensorsManager
 
-# The manager will read the config, build the Enum, initialize the I2C
-# buses via blinka, and start threads for all sensors.
-sensors = SensorsManager(config)
+sensors = robot.sensor.get_sensor("main_gyro")
 
-# Gather grouped values
-# .Direction was created based on the strings found in the YAML
-front_dict = sensors.get_readings_by_direction(sensors.Direction.FRONT)
-# Expected Output: {"front_left": 120, "front_right": 122}
+# Calibrate while holding robot perfectly still
+offsets = sensors.calibrate(samples=100, delay_ms=10)
+print(f"Calibration offsets: {offsets}")
+# {'yaw': 0.5, 'pitch': -0.3, 'roll': 1.2}
 
-# Check data freshness
-my_sensor = sensors.get_sensor("front_tof")
-age = my_sensor.get_reading_age()
+# Apply calibration automatically to future readings
+adjusted = sensors.get_value_adjusted()
+print(adjusted)  # Offsets already subtracted
 
-if age > 0.5:
-    print("Warning: The front sensor thread hasn't responded for half a second!")
+# Reset orientation (set current as "home/zero")
+sensors.reset_orientation()
 ```
 
-## IMU / Gyroscope Features
+---
 
-The library ships with a highly customizable and unified interface for Inertial Measurement Units (IMUs), implemented in the `IMUSensor` class. 
+## ToF Sensor Configuration
 
-### Supported Models
+### XSHUT Pin Management (Multi-Sensor Setup)
 
-- **BNO055** and **BNO085**: High-end sensors with built-in hardware Sensor Fusion. The library automatically fetches and normalizes the absolute Euler angles calculated natively by the chip's internal co-processor.
-- **MPU6050**: An entry-level 6-DOF IMU that strictly provides raw Accelerometer and Gyroscope data. Since it lacks a hardware compass or fusion processor, the `IMUSensor` class natively implements a **Software Complementary Filter** running under the hood in the polling thread. It fuses the Accelerometer gravity vectors (for absolute Pitch/Roll stability) with the Gyroscope integrations (for fast response and Yaw tracking), meaning your application code will never have to perform complex math.
+When using multiple ToF sensors, they all boot at address `0x29` by default. BaraCommLib handles sequential initialization:
 
-### Axis Mapping and Inversions
+```yaml
+tof:
+  - id: "front"
+    direction: "front"
+    model: "VL53L1X"
+    bus: "i2c_1"
+    xshut_pin: 15      # GPIO pin controlling power
+    default_address: 0x29
+    new_address: 0x30  # Unique address after initialization
+    
+  - id: "left"
+    direction: "left"
+    model: "VL53L1X"
+    bus: "i2c_1"
+    xshut_pin: 16
+    default_address: 0x29
+    new_address: 0x31
+    
+  - id: "right"
+    direction: "right"
+    model: "VL53L1X"
+    bus: "i2c_1"
+    xshut_pin: 17
+    default_address: 0x29
+    new_address: 0x32
+```
 
-Physical orientation inside your robot chassis often differs from the sensor board's standard axes. The library allows arbitrary mappings and inversions so that `{"yaw": ..., "pitch": ..., "roll": ...}` always match your robot's coordinate frame, strictly wrapped continuously between `0` and `360` degrees.
+**Initialization Sequence:**
+1. All XSHUT pins held LOW (sensors off)
+2. Turn on first sensor → change address to `0x30`
+3. Wait 50ms
+4. Turn on second sensor → change address to `0x31`
+5. Repeat for all sensors
 
-This is managed entirely via the `baraconfig.yaml` configuration using two parameters:
-- `axis_mapping`: A list like `[0, 1, 2]` which remaps the raw `(Yaw, Pitch, Roll)` variables to different indices. 
-- `inverted_axes`: A list like `[False, True, False]` to negate angles.
+### Supported ToF Models
 
-### Gyroscope Example Usage
+| Model | Notes |
+|-------|-------|
+| VL53L0X | Basic model, limited features |
+| VL53L1X | Most common, good range (up to 2m) |
+| VL53L4CD | Advanced, multi-target detection |
+
+---
+
+## Sensor Failure Detection & Recovery
+
+### Automatic Fail-Safe
+
+Sensors continuously monitored for failures:
 
 ```python
-# Assuming you named your IMU 'main_gyro' in your YAML file
-gyro_reading = sensors.get_reading("main_gyro")
+# Inside AbstractSensor._polling_loop():
+consecutive_errors = 0
+first_error_time = None
 
-if gyro_reading:
-    yaw = gyro_reading["yaw"]
-    pitch = gyro_reading["pitch"]
-    roll = gyro_reading["roll"]
+try:
+    val = self._read_hardware()
+    self._latest_reading = SensorReading(val, time.time(), is_valid=True)
+    consecutive_errors = 0  # Reset on success
+except Exception as e:
+    consecutive_errors += 1
+    first_error_time = time.time() if first_error_time is None else first_error_time
     
-    print(f"Current Robot Heading: {yaw:.1f}°")
+    # Exponential backoff (max 5 seconds)
+    time.sleep(min(5.0, poll_rate * 1.5 ** consecutive_errors))
     
-    # Simple threshold logic without doing complex vector math
-    if pitch > 30.0 and pitch < 180.0:
-        print("Warning: Robot is climbing a steep incline!")
+    # Trigger fail-safe after 5+ seconds of continuous failure
+    if time.time() - first_error_time >= 5.0:
+        logging.critical(f"Sensor {self.sensor_id} failed for 5+ seconds!")
+        self.on_critical_failure(sensor_type, bus_id)
 ```
+
+### Exponential Backoff Strategy
+
+| Failure # | Wait Time | Purpose |
+|-----------|-----------|---------|
+| 1st | 30ms (base rate) | Quick retry |
+| 2nd | 45ms | Allow sensor recovery |
+| 3rd | 67ms | Prevent I2C flooding |
+| ... | Increasing | Max out at 5s |
+
+> [!TIP]
+> This prevents CPU spinning while giving sensors time to recover from temporary issues (loose connections, I2C noise).
+
+---
+
+## Custom Sensor Development
+
+Extend `AbstractSensor` for custom hardware:
+
+```python
+from baracommlib.sensors import AbstractSensor, SensorsManager
+import time
+
+class CustomSensor(AbstractSensor):
+    def __init__(self, config_node, i2c_bus, sensor_type="custom", bus_id="main"):
+        super().__init__(config_node, i2c_bus, sensor_type, bus_id)
+        
+    def _initialize_hardware(self):
+        # Initialize your custom hardware here
+        self._sensor_instance = YourHardwareClass(i2c_bus)
+        
+    def _read_hardware(self):
+        try:
+            return self._sensor_instance.read_value()
+        except Exception as e:
+            raise  # Let fail-safe handle it
+
+# Register in SensorsManager (automatic via config)
+```
+
+---
+
+## Sensor Reading Age Monitoring
+
+Track how fresh your sensor data is:
+
+```python
+sensor = robot.sensor.get_sensor("front_tof")
+age = sensor.get_reading_age()
+
+if age > 0.1:  # More than 100ms old
+    print(f"Sensor reading stale ({age:.2f}s)")
+elif age > 0.5:  # More than 500ms old
+    print(f"Sensor thread may be stuck!")
+
+# Use in critical loops
+while True:
+    distance = robot.sensor.get("front_tof")
+    age = robot.sensor.get_sensor("front_tof").get_reading_age()
+    
+    if age < 0.1 and distance is not None:  # Fresh reading
+        if distance < 200:
+            robot.drivetrain.coast()
+            
+    time.sleep(0.05)
+```
+
+---
+
+## Troubleshooting
+
+### "Sensor thread stopped after 5.5s" but robot didn't stop
+- Verify `stop_robot_callback` passed to `SensorsManager`:
+  ```python
+  sensors = SensorsManager(config, stop_robot_callback=robot.drivetrain.stop)
+  ```
+
+### Sensor returns constant value (no updates)
+- Check I2C wiring and power
+- Lower I2C frequency: `frequency: 100000` in config
+- Verify sensor model matches actual hardware
+
+### Multiple sensors on same bus all fail
+- All sensors of that type will be reinitialized together
+- This is expected behavior - check individual sensor wiring
+
+---
+
+## Related Documentation
+
+- [Fail-Safe System](./fail_safe.md) - Automatic crash recovery
+- [BaraRobot Class](./bararobot.md) - High-level sensor access
+- [IMU Configuration](./configuration.md#imu-setup) - Axis mapping details

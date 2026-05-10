@@ -1,272 +1,457 @@
-# Computer Vision Subsystem
+# Computer Vision & AI Subsystem
 
-BaraCommLib introduces a revolutionary, "plug-and-play" Computer Vision layer specifically designed for Raspberry Pi robots. 
-Training neural networks and running them efficiently on ARM processors is usually a daunting task that involves mastering OpenCV, TensorFlow, PyTorch, and TFLite exports.
-
-We abstracted all this complexity away. You can now generate datasets, train a lightweight transfer-learning model, and run $O(1)$ real-time classifications using fewer than 5 lines of code.
-
-> [!NOTE]
-> The Vision module is divided into two distinct parts:
-> 1. **PC Tools**: `DatasetTool` and `AutoTrainer` (Used on your powerful computer to prepare the AI).
-> 2. **Robot API**: The `robot.vision` object (Used on the Raspberry Pi for instant inference).
+BaraCommLib provides a complete computer vision pipeline for Raspberry Pi robots: dataset generation, transfer learning training, and real-time inference - all optimized for ARM processors.
 
 ---
 
-## 1. Preparing the Dataset (`DatasetTool`)
-Deep learning models need hundreds of images to understand what an object looks like under different lighting or angles. Capturing hundreds of photos manually is tedious.
+## System Architecture
 
-The `DatasetTool` automatically performs **Data Augmentation**. You just provide a few raw photos of your objects, and it will artificially generate thousands of variations (rotated, noisy, brightened).
-
-### Usage (Run this on your PC)
-Organize your raw photos in folders named after the classes you want to detect:
-```text
-raw_data/
-├── red_ball/
-│   ├── img1.jpg
-│   └── img2.jpg
-└── soda_can/
-    └── can1.jpg
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    PC Development Tools                     │
+│  ┌──────────────────┐         ┌─────────────────────────┐   │
+│  │   DatasetTool    │───────▶│     AutoTrainer         │   │
+│  │                  │         │                         │   │
+│  │ • Data           │         │ • Downloads MobileNetV2 │   │
+│  │   Augmentation   │         │ • Freezes base layers   │   │
+│  │ • Generates      │         │ • Trains custom head    │   │
+│  │   variants       │         │ • Exports TFLite        │   │
+│  └──────────────────┘         └─────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Raspberry Pi Runtime                      │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │              VisionManager (Background Thread)       │   │
+│  │  ┌──────────────┐    ┌────────────────────────────┐  │   │
+│  │  │ Camera Poll  │──▶│   TFLite Inference         │  │   │
+│  │  │ (O(1) Cache) │    │   (20-50ms on RPi 5)       │  │   │ 
+│  │  └──────────────┘    └────────────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-Then, run the generator:
+---
+
+## Part 1: Dataset Generation (PC Tools)
+
+### `DatasetTool` - Automatic Data Augmentation
+
+Deep learning models need hundreds of training images. `DatasetTool` automatically generates variations from a few raw photos.
+
+#### Usage
+
 ```python
 from baracommlib.vision import DatasetTool
 
+# Organize your raw photos:
+# raw_data/
+# ├── red_ball/
+# │   ├── img1.jpg
+# │   └── img2.jpg
+# └── soda_can/
+#     └── can1.jpg
+
 DatasetTool.generate(
-    input_folder="raw_data", 
-    output_folder="ready_dataset", 
-    image_size=(224, 224),          # Required resolution for MobileNetV2
-    variants_per_image=50,          # Generates 50 new images from each raw photo
-    create_background_class=True    # Auto-generates a "background" class with noise
+    input_folder="raw_data",              # Folder with your photos
+    output_folder="ready_dataset",        # Output folder (auto-created)
+    image_size=(224, 224),                # Required: MobileNetV2 input size
+    variants_per_image=50,                # Generate 50 variations per photo
+    create_background_class=True          # Add "background" class (recommended!)
 )
+
+print("Dataset generated!")
+# Output folder structure:
+# ready_dataset/
+# ├── red_ball/
+# │   ├── img1_v0.jpg
+# │   ├── img1_v1.jpg
+# │   └── ...
+# ├── soda_can/
+# └── background/  # Noise-only images for "nothing detected" cases
 ```
 
+#### Data Augmentation Techniques
+
+`DatasetTool` applies these transformations automatically:
+- **Rotation**: ±360° in random increments
+- **Brightness**: -50% to +150%
+- **Contrast**: Variable adjustments
+- **Noise**: Gaussian and salt-and-pepper noise
+- **Blur**: Motion blur simulation
+- **Color jitter**: Hue/saturation shifts
+
 > [!TIP]
-> Setting `create_background_class=True` is highly recommended. It prevents your robot from giving false positives when neither the classes are recognized. 
+> Setting `create_background_class=True` is crucial. It prevents false positives when neither object class is recognized by teaching the model what "empty scene" looks like.
 
 ---
 
-## 2. 1-Click Transfer Learning (`AutoTrainer`)
-Once your `ready_dataset` is generated, you need to train a Neural Network. 
-`AutoTrainer` automatically downloads a lightweight `MobileNetV2` architecture, freezes its core layers, attaches custom layers for your specific classes, and trains them using Transfer Learning.
+## Part 2: Transfer Learning Training (PC Tools)
 
-### Usage (Run this on your PC)
+### `AutoTrainer` - One-Click Model Training
+
+Automatically downloads MobileNetV2, freezes base layers, and trains custom classification head.
+
+#### Usage
+
 ```python
 from baracommlib.vision import AutoTrainer
 
+# Train your classifier
 AutoTrainer.train_classifier(
-    dataset_folder="ready_dataset",
-    output_model_path="robot_brain.tflite",
-    epochs=10 # Higher epochs = better accuracy, but longer training time
+    dataset_folder="ready_dataset",      # Output from DatasetTool
+    output_model_path="robot_brain.tflite",  # Save location on PC
+    epochs=10                            # Training iterations (higher = better accuracy)
 )
+
+print("Training complete!")
+# Generated files:
+# • robot_brain.tflite          # Optimized model for Raspberry Pi
+# • robot_brain_labels.json     # Class names mapping
 ```
 
+#### Training Process
+
+1. **Downloads MobileNetV2**: Lightweight architecture (5MB, ~7.4M params)
+2. **Freezes base layers**: Pre-trained ImageNet weights remain frozen
+3. **Attaches custom head**: New classification layer for your classes
+4. **Trains with transfer learning**: Only trains new layers (~10-60 minutes)
+
+#### Training Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `epochs` | 10 | Number of training iterations (5-20 recommended) |
+| `batch_size` | 32 | Images per batch (adjust for GPU memory) |
+| `learning_rate` | 0.001 | Training step size |
+
 > [!IMPORTANT]
-> The script will output two files: `robot_brain.tflite` (the optimized Neural Network) and `robot_brain_labels.json` (the text names of your classes). Copy **both** of these files to your Raspberry Pi!
+> Copy **both** generated files to your Raspberry Pi:
+> - `robot_brain.tflite` (the model)
+> - `robot_brain_labels.json` (class names)
 
 ---
 
-## 3. Real-Time Inference on the Robot (`BaraRobot`)
+## Part 3: Real-Time Inference (Robot Runtime)
 
-> [!WARNING]
-> Before writing code, ensure you have enabled vision in your `baraconfig.yaml` and specified the path to your `.tflite` model. The labels JSON must be in the same folder.
+### VisionManager Configuration
 
-**baraconfig.yaml:**
+Add vision to your `baraconfig.yaml`:
+
 ```yaml
 vision:
-  enabled: true 
-  model_path: "robot_brain.tflite" 
+  enabled: true                          # Enable vision subsystem
+  model_path: "robot_brain.tflite"       # Path to TFLite model
   cameras:
-    - id: "main_cam"
-      source: 0 # 0 for USB/CSI Camera
-      resolution: [640, 480]
+    - id: "main_cam"                     # Unique camera identifier
+      source: 0                          # Camera device (0=/dev/video0, 1=/dev/video1)
+      resolution: [640, 480]             # Force this capture size
 ```
 
-### Usage (Run this on your Raspberry Pi)
-Reading from a camera with OpenCV is inherently blocking. BaraCommLib solves this by launching a dedicated background thread that continuously polls the camera. 
-
-When you call `classify()`, you get the inference of the absolute latest frame in $O(1)$ time, preventing your main motor/PID loops from stuttering.
+### Basic Usage
 
 ```python
 from baracommlib.BaraRobot import BaraRobot
 
 robot = BaraRobot("baraconfig.yaml")
 
-# The model and camera threads are already loaded by the BaraRobot constructor!
+# Vision is automatically initialized by BaraRobot constructor!
 
 while True:
-    # Instant classification
+    # Instant O(1) classification (no blocking!)
     result = robot.vision.classify("main_cam")
     
     if "error" not in result:
         label = result["label"]
-        confidence = result["confidence"]
+        confidence = result["confidence"]  # 0.0 to 1.0
         
-        print(f"I see a {label} with {confidence*100:.1f}% certainty!")
+        print(f"I see a {label} ({confidence*100:.1f}% confident)")
         
+        # React to detections
         if label == "red_ball" and confidence > 0.85:
-            robot.drivetrain.move_forward_action(50)
+            robot.drivetrain.move_forward_action(60)
         elif label == "background":
-            robot.drivetrain.coast()
+            robot.drivetrain.coast()  # Nothing detected
+            
+    time.sleep(0.1)  # Limit to ~10 FPS (adjust for your needs)
 ```
 
-> [!CAUTION]
-> Because camera threads hold system hardware resources, always ensure you call `robot.cleanup()` when your program exits to safely release `/dev/video0`.
+### Classification Result Format
 
-## Color Tracker (OpenCV Wrapper)
+```python
+result = {
+    "label": "red_ball",              # Detected class name from labels.json
+    "confidence": 0.92,               # Probability score (0-1)
+    "inference_time_ms": 35.4         # Time taken for inference
+}
 
-BaraCommLib includes a highly adaptable `ColorTracker` abstraction for OpenCV. This allows you to check if a specific color exists within a specific region of the camera frame.
+# Error cases:
+result = {
+    "error": "No frame available from camera 'main_cam'."
+}
+```
 
-### Basic Usage
+---
 
-The tracker comes preloaded with **10 common color presets** (red, green, blue, yellow, orange, purple, cyan, magenta, white, black) calibrated for both HSV and BGR/RGB color spaces. You don't need to define them unless you want to override or add new custom colors.
+## Color Tracking System
+
+BaraCommLib includes a robust color detection system using OpenCV's HSV/BGR color spaces.
+
+### Built-in Color Presets
+
+10 pre-calibrated colors for both HSV and BGR:
+
+| Color | HSV Range | Use Case |
+|-------|-----------|----------|
+| Red | 0-10, 120-255, 70-255 | Traffic lights, markers |
+| Green | 40-90, 50-255, 50-255 | Plants, targets |
+| Blue | 100-140, 150-255, 0-255 | Water, sky detection |
+| Yellow | 20-40, 100-255, 100-255 | Warnings, markers |
+| Orange | 10-25, 100-255, 100-255 | Construction, safety |
+| Purple | 130-160, 50-255, 50-255 | Rare targets |
+| Cyan | 80-100, 100-255, 100-255 | Water, screens |
+| Magenta | 140-170, 100-255, 100-255 | Markers, indicators |
+| White | 0-180, 0-30, 200-255 | Surfaces, clouds |
+| Black | 0-180, 0-255, 0-50 | Text, shadows |
+
+### ColorTracker Usage
 
 ```python
 from baracommlib.vision.color_tracker import ColorTracker
 import cv2
 
-# Initialize the tracker. 
-# It will load the presets automatically.
+# Initialize with default presets
 tracker = ColorTracker()
 
-# If you want to define a custom color or override an existing one:
-# custom_colors = {
-#     'custom_pink': {
-#         'hsv': {'lower': (160, 50, 50), 'upper': (170, 255, 255)},
-#         'rgb': {'lower': (255, 100, 200), 'upper': (255, 192, 203)}
-#     }
-# }
-# tracker = ColorTracker(custom_colors)
-```
-
-### Checking Regions
-
-To use the tracker, provide the frame and the specific Region Of Interest (ROI) dimensions: `x`, `y`, `width`, `height`. You can also specify the `color_space` ('hsv' is the default and strongly recommended for hardware as it ignores shadows, but 'rgb'/'bgr' is fully supported if you prefer).
-
-```python
-# Assuming you have a frame from cv2.VideoCapture or the VisionManager
-# Check if the top-right quadrant (e.g., x=320, y=0, w=320, h=240) contains red
+# Check if a color exists in a region of interest (ROI)
 has_red = tracker.check_region_color(
-    frame=current_frame,
-    x=320, y=0, w=320, h=240,
-    target_color='red',
-    color_space='hsv', # or 'rgb'
-    threshold=0.2 # Returns True if color covers >20% of the area
+    frame=current_frame,           # OpenCV BGR numpy array
+    x=320, y=0, w=320, h=240,      # ROI: top-right quadrant
+    target_color='red',            # Color name from presets
+    color_space='hsv',             # 'hsv' (recommended) or 'bgr'/'rgb'
+    threshold=0.2                  # True if >20% of area matches
 )
 
 if has_red:
     robot.drivetrain.stop()
-    print("Red detected in the targeted area!")
+    print("Red detected in target area!")
 ```
 
----
+### Custom Color Definitions
 
-## Advanced Color Tracker Patterns
-
-### Combining with VisionManager
-
-The `ColorTracker` works seamlessly with the `VisionManager` background thread:
+Override presets or add new colors:
 
 ```python
-from baracommlib import BaraRobot
-from baracommlib.vision.color_tracker import ColorTracker
+custom_colors = {
+    'my_pink': {
+        'hsv': {'lower': (160, 50, 50), 'upper': (170, 255, 255)},
+        'bgr': {'lower': (255, 100, 200), 'upper': (255, 192, 203)}
+    },
+    'custom_blue': {
+        'hsv': {'lower': (100, 80, 40), 'upper': (130, 255, 255)},
+        # No BGR bounds - will use HSV only
+    }
+}
 
-robot = BaraRobot("baraconfig.yaml")
-tracker = ColorTracker()
+tracker = ColorTracker(custom_colors)
 
-# Get the latest frame from the background camera thread (non-blocking!)
-frame = robot.vision.get_latest_frame("main_cam")
-
-if frame is not None:
-    # Split screen into 4 quadrants for line following
-    h, w = frame.shape[:2]
-    
-    # Check each quadrant for specific colors
-    left quadrant_has_yellow = tracker.check_region_color(
-        frame, x=0, y=h//2, w=w//2, h=h//2, 
-        target_color="yellow", color_space="hsv"
-    )
-    
-    right_quadrant_has_green = tracker.check_region_color(
-        frame, x=w//2, y=h//2, w=w//2, h=h//2, 
-        target_color="green", color_space="hsv"
-    )
-    
-    if left_quadrant_has_yellow:
-        robot.drivetrain.turn_left_action(50)
-    elif right_quadrant_has_green:
-        robot.drivetrain.turn_right_action(50)
+# Now 'my_pink' and 'custom_blue' are available
+has_custom = tracker.check_region_color(
+    frame, x=0, y=0, w=320, h=240,
+    target_color='my_pink', color_space='hsv'
+)
 ```
 
-> [!IMPORTANT]
-> `get_latest_frame()` is an **O(1)** operation because the VisionManager maintains a shared reference to the latest frame. It never blocks waiting for the camera.
+### Advanced Color Tracking Patterns
 
-### Adaptive Thresholding
+#### Multi-Region Detection
 
-For more nuanced applications, you can dynamically adjust the threshold based on lighting conditions:
+Check multiple colors across different screen regions:
+
+```python
+def scan_for_colors(tracker, frame):
+    """Scan 4 quadrants for specific colors."""
+    h, w = frame.shape[:2]
+    
+    results = {}
+    
+    # Top-left quadrant - look for yellow
+    results['top_left_yellow'] = tracker.check_region_color(
+        frame, x=0, y=0, w=w//2, h=h//2,
+        target_color='yellow', color_space='hsv'
+    )
+    
+    # Bottom-right - look for green
+    results['bottom_right_green'] = tracker.check_region_color(
+        frame, x=w//2, y=h//2, w=w//2, h=h//2,
+        target_color='green', color_space='hsv'
+    )
+    
+    return results
+
+# Usage in main loop
+color_scan = scan_for_colors(tracker, robot.vision.get_latest_frame("main_cam"))
+if color_scan['top_left_yellow']:
+    print("Yellow detected top-left!")
+```
+
+#### Adaptive Thresholding
+
+Adjust detection sensitivity based on lighting conditions:
 
 ```python
 import numpy as np
 
 def adaptive_color_check(tracker, frame, region, target_color):
-    """Adjusts threshold based on ambient light estimation."""
-    # Get average brightness in the region (V channel in HSV)
+    """Dynamically adjust threshold based on ambient light."""
+    x, y, w, h = region
+    
+    # Get average brightness in ROI (V channel in HSV)
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    region_v = hsv[region[1]:region[1]+region[3], region[0]:region[0]+region[2], 2]
-    avg_brightness = np.mean(region_v)
+    roi_v = hsv[y:y+h, x:x+w, 2]
+    avg_brightness = np.mean(roi_v)
     
     # Darker environment = lower threshold for better detection
-    threshold = 0.3 if avg_brightness < 100 else 0.15
+    if avg_brightness < 80:
+        threshold = 0.15  # Low light - be more permissive
+    elif avg_brightness < 150:
+        threshold = 0.2   # Normal lighting
+    else:
+        threshold = 0.3   # Bright - require stronger match
     
     return tracker.check_region_color(
-        frame, *region, target_color=target_color, 
-        color_space="hsv", threshold=threshold
+        frame, x, y, w, h, target_color, 
+        color_space='hsv', threshold=threshold
     )
-```
-
-### Multi-Color Detection
-
-To detect multiple colors simultaneously without scanning the image twice:
-
-```python
-def detect_all_colors(tracker, frame, regions):
-    """Checks multiple colors across multiple regions in one pass."""
-    detections = {}
-    
-    for region_name, (x, y, w, h) in regions.items():
-        detections[region_name] = {}
-        
-        for color in ['red', 'green', 'blue']:
-            has_color = tracker.check_region_color(
-                frame, x, y, w, h, color, color_space='hsv', threshold=0.15
-            )
-            detections[region_name][color] = has_color
-            
-    return detections
 
 # Usage
-regions = {
-    'left': (0, 100, 200, 200),
-    'center': (220, 100, 200, 200),
-    'right': (440, 100, 200, 200)
-}
+if adaptive_color_check(tracker, frame, (0, 100, 200, 200), 'red'):
+    print("Red detected with adaptive threshold!")
+```
 
-results = detect_all_colors(tracker, frame, regions)
-# Results: {'left': {'red': True, 'green': False, 'blue': False}, ...}
+#### Line Following with Color
+
+Detect colored lines for navigation:
+
+```python
+def follow_colored_line(tracker, frame):
+    """Follow a red line using center sensor."""
+    h, w = frame.shape[:2]
+    
+    # Check center region for red line
+    has_red = tracker.check_region_color(
+        frame, x=w//2-50, y=h//2-10, w=100, h=20,
+        target_color='red', color_space='hsv', threshold=0.3
+    )
+    
+    if has_red:
+        robot.drivetrain.move_forward_action(50)
+    else:
+        robot.drivetrain.coast()  # Lost the line
+
+follow_colored_line(tracker, robot.vision.get_latest_frame("main_cam"))
 ```
 
 ---
 
-## Troubleshooting Vision Module
+## Camera Configuration Options
 
-> [!CAUTION]
-> **Camera not releasing**: If your program crashes without calling `cleanup()`, the camera device (`/dev/video0`) may remain locked. Kill orphaned Python processes or reboot the Pi to release it.
+### Resolution Settings
 
-> [!WARNING]
-> **Low FPS on Raspberry Pi**: If inference is slow, ensure your TFLite model is quantized. The `AutoTrainer` does this automatically, but never use a full-precision `model.tflite` on ARM.
+Force specific capture resolution for optimal performance:
+
+```yaml
+cameras:
+  - id: "main_cam"
+    source: 0
+    resolution: [320, 240]   # Lower res = faster inference on RPi
+```
 
 > [!TIP]
-> **Black frames**: If `classify()` returns `None`, check that your camera's `source` ID in the config matches your actual device (`ls -l /dev/video*`).
+> Smaller resolutions (320x240) work well for object classification. Use 640x480 or higher only if you need detailed visual analysis.
 
-> [!NOTE]
-> **YUV vs BGR**: OpenCV defaults to BGR, but some USB cameras output YUV. If colors look wrong, the `VisionManager` automatically converts the frame to BGR before inference to ensure consistent results.
+### Multiple Cameras
+
+Support for multiple camera inputs:
+
+```yaml
+vision:
+  enabled: true
+  model_path: "robot_brain.tflite"
+  cameras:
+    - id: "front_cam"
+      source: 0
+      resolution: [640, 480]
+    - id: "side_cam"
+      source: 1
+      resolution: [320, 240]
+
+# Usage
+front_result = robot.vision.classify("front_cam")
+side_result = robot.vision.classify("side_cam")
+```
+
+---
+
+## Performance Optimization
+
+### Inference Speed Guidelines
+
+| RPi Model | Resolution | Expected FPS |
+|-----------|------------|--------------|
+| RPi 3 B+ | 320x240    | ~5-8 FPS     |
+| RPi 4 (4GB) | 640x480   | ~15-20 FPS   |
+| RPi 5 | 640x480    | ~25-35 FPS   |
+
+### Tips for Better Performance
+
+1. **Use quantized TFLite models**: `AutoTrainer` exports int8 by default
+2. **Lower resolution**: 320x240 is often sufficient for classification
+3. **Limit update rate**: Don't call `classify()` every frame - throttle to 5-15 FPS
+4. **Use background thread**: `get_latest_frame()` is O(1) and non-blocking
+
+```python
+# Throttled inference (recommended pattern)
+last_inference = 0
+while True:
+    current_time = time.time()
+    
+    if current_time - last_inference > 0.1:  # Max 10 FPS
+        result = robot.vision.classify("main_cam")
+        last_inference = current_time
+        
+        # Process result...
+        
+    time.sleep(0.02)  # Cap at ~50 FPS max loop rate
+```
+
+---
+
+## Troubleshooting
+
+### "Model file not found"
+- Ensure `robot_brain.tflite` is in the same directory as your script
+- Verify file was copied from PC to Pi (both model AND labels.json required)
+
+### Camera returns black frames
+- Check camera source ID: `ls -l /dev/video*`
+- Verify USB camera is powered and connected
+- Try different resolution settings
+
+### Low FPS / Slow inference
+- Use smaller resolution in config
+- Ensure model is quantized (check file size: ~2MB for int8 vs ~4MB for float32)
+- Close other CPU-intensive applications
+
+### Colors look wrong
+- OpenCV uses BGR by default, not RGB
+- Always use `color_space='hsv'` for best results (lighting-invariant)
+- Check if camera outputs YUV instead of BGR (rare USB cameras)
+
+---
+
+## Related Documentation
+
+- [PID Controller](./pid_io.md) - Combine vision with precise movement
+- [State Machine](./pid_io.md#state-machine) - Organize vision-based behaviors
+- [Obstacle Avoidance](../pid_io.md#obstacle-avoidance) - Multi-sensor fusion patterns
