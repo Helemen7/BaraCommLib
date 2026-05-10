@@ -10,7 +10,7 @@ BaraCommLib includes an intelligent fail-safe architecture that automatically de
 ┌─────────────────────────────────────────────────────────────┐
 │                    Sensor Failure Detection                 │
 │  ┌──────────────────┐     ┌──────────────────────────────┐  │
-│  │   Background     │───▶│   Error Counter              │  │
+│  │   Background     │────▶│   Error Counter              │  │
 │  │   Polling Thread │     │   (consecutive_errors)       │  │
 │  └──────────────────┘     └──────────────────────────────┘  │
 │                                    ▼                        │
